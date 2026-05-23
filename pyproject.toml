@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veritas"
+version = "0.1.0"
+description = "Bitcoin-anchored, Schnorr-signed AI inference attestation oracle"
+requires-python = ">=3.11"
+authors = [{ name = "Ifasola", email = "Ifasola34@icloud.com" }]
+dependencies = [
+    "coincurve>=20.0",
+    "fastapi>=0.112",
+    "uvicorn[standard]>=0.30",
+    "click>=8.1",
+    "rich>=13.7",
+    "httpx>=0.27",
+    "websocket-client>=1.7",
+    "pydantic>=2.7",
+]
+
+[project.scripts]
+veritas = "veritas.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["veritas*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
