@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .anchor import Utxo, build_anchor_tx, derive_anchor_pubkey, AnchorTx
+from .broadcast import Broadcaster, NullBroadcaster, BroadcastResult
 from .attestation import (
     Attestation,
     SignedAttestation,
@@ -53,6 +54,7 @@ class Epoch:
     root_hex: str | None = None
     checkpoint_event: NostrEvent | None = None
     anchor_tx: AnchorTx | None = None
+    broadcast_result: BroadcastResult | None = None
 
 
 @dataclass
@@ -61,6 +63,7 @@ class OracleConfig:
     epoch_seconds: int = 600
     anchor_utxo: Utxo | None = None   # if None, anchor tx is skipped
     fee_sats: int = 500
+    broadcaster: Broadcaster | None = None  # NullBroadcaster if None
 
 
 class Oracle:
@@ -174,6 +177,13 @@ class Oracle:
             )
             self.current.anchor_tx = tx
             anchor_txid = tx.txid
+            # Optional broadcast. NullBroadcaster (the default) returns
+            # ok=True with no txid so the rest of the close path is
+            # unchanged. A failing real broadcast does NOT roll back the
+            # epoch — the tx hex is already in checkpoint.json and the
+            # operator can rebroadcast manually.
+            broadcaster = self.config.broadcaster or NullBroadcaster()
+            self.current.broadcast_result = broadcaster.broadcast(tx.raw_hex)
 
         cp = build_checkpoint_event(
             key=self.key,
@@ -242,6 +252,16 @@ class Oracle:
                     "op_return_payload_hex": epoch.anchor_tx.op_return_payload.hex(),
                 }
                 if epoch.anchor_tx
+                else None
+            ),
+            "broadcast": (
+                {
+                    "ok": epoch.broadcast_result.ok,
+                    "txid": epoch.broadcast_result.txid,
+                    "error": epoch.broadcast_result.error,
+                    "backend": epoch.broadcast_result.backend,
+                }
+                if epoch.broadcast_result
                 else None
             ),
         }
@@ -332,8 +352,21 @@ class Oracle:
                             op_return_payload=bytes.fromhex(a["op_return_payload_hex"]),
                             fee_sats=int(a["fee_sats"]),
                         )
+                    if cp.get("broadcast"):
+                        b = cp["broadcast"]
+                        loaded_broadcast = BroadcastResult(
+                            ok=bool(b.get("ok")),
+                            txid=b.get("txid"),
+                            error=b.get("error"),
+                            backend=b.get("backend", "unknown"),
+                        )
+                    else:
+                        loaded_broadcast = None
                 except (json.JSONDecodeError, KeyError, ValueError, OSError):
                     closed = False  # treat torn checkpoint as still-open
+                    loaded_broadcast = None
+            else:
+                loaded_broadcast = None
 
             # Refuse to serve a closed epoch whose on-disk attestation count
             # disagrees with the signed checkpoint leaf_count — otherwise
@@ -361,6 +394,7 @@ class Oracle:
                 root_hex=root_hex,
                 checkpoint_event=checkpoint_event,
                 anchor_tx=anchor_tx,
+                broadcast_result=loaded_broadcast,
             )
             if closed:
                 past.append(ep)

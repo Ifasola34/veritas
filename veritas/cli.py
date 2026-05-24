@@ -15,6 +15,7 @@ from rich.table import Table
 
 from .anchor import Utxo
 from .attestation import SignedAttestation, attestation_digest
+from .broadcast import make_broadcaster
 from .crypto import OracleKey
 from .lightning import DeterministicMockBackend, authorize, make_challenge
 from .merkle import verify_merkle_proof, MerkleProof
@@ -69,16 +70,19 @@ def serve(key_path: str, data_dir: str, epoch_seconds: int, host: str, port: int
     import uvicorn
     from .server import create_app
     key = OracleKey.from_hex(Path(key_path).read_text().strip())
+    broadcaster = make_broadcaster()
     oracle = Oracle(key, OracleConfig(
         data_dir=Path(data_dir),
         epoch_seconds=epoch_seconds,
+        broadcaster=broadcaster,
     ))
     app = create_app(oracle)
     console.print(Panel.fit(
         f"[bold]VERITAS oracle running[/bold]\n"
-        f"pubkey: [yellow]{oracle.pubkey_hex}[/yellow]\n"
-        f"data:   {data_dir}\n"
-        f"http:   http://{host}:{port}\n"
+        f"pubkey:      [yellow]{oracle.pubkey_hex}[/yellow]\n"
+        f"data:        {data_dir}\n"
+        f"http:        http://{host}:{port}\n"
+        f"broadcaster: {broadcaster.name}\n"
     ))
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
@@ -120,7 +124,11 @@ def attest(key_path: str, data_dir: str, model: str, text: str) -> None:
 def close(key_path: str, data_dir: str) -> None:
     """Force-close the current epoch and print the anchor."""
     key = OracleKey.from_hex(Path(key_path).read_text().strip())
-    oracle = Oracle(key, OracleConfig(data_dir=Path(data_dir)))
+    broadcaster = make_broadcaster()
+    oracle = Oracle(key, OracleConfig(
+        data_dir=Path(data_dir),
+        broadcaster=broadcaster,
+    ))
     e = oracle.close_epoch()
     console.print(f"closed epoch [bold]{e.number}[/bold] with {len(e.attestations)} attestations")
     if e.root_hex:
@@ -130,6 +138,14 @@ def close(key_path: str, data_dir: str) -> None:
         console.print(f"OP_RETURN  : [cyan]{e.anchor_tx.op_return_payload.hex()}[/cyan]")
         console.print("tx hex     :")
         console.print(Syntax(e.anchor_tx.raw_hex, "text", background_color="default", word_wrap=True))
+    if e.broadcast_result and e.broadcast_result.backend != "null":
+        status = "[bold green]broadcast OK[/bold green]" if e.broadcast_result.ok \
+            else "[bold red]broadcast FAILED[/bold red]"
+        console.print(f"{status} via {e.broadcast_result.backend}")
+        if e.broadcast_result.txid:
+            console.print(f"network txid: [yellow]{e.broadcast_result.txid}[/yellow]")
+        if e.broadcast_result.error:
+            console.print(f"error: [red]{e.broadcast_result.error}[/red]")
 
 
 @cli.command()
