@@ -207,12 +207,20 @@ def authorize(
         return False
     if require_backend_settled and not ln.check_paid(m.payment_hash):
         return False
+    # Every macaroon MUST carry at least one exp= caveat so authorization
+    # has a bounded lifetime. A caveat-less macaroon would otherwise
+    # authorize forever — make_challenge always issues one, so reject
+    # anything that lacks one (either tampering or a non-VERITAS issuer).
     now = int(time.time())
+    saw_exp = False
     for c in m.caveats:
         if c.startswith("exp="):
+            saw_exp = True
             try:
                 if int(c.split("=", 1)[1]) < now:
                     return False
             except ValueError:
                 return False
+    if not saw_exp:
+        return False
     return True

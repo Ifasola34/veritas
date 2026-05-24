@@ -45,6 +45,8 @@ def keygen(out: str) -> None:
         raise click.ClickException(
             f"refusing to overwrite existing key file: {out}"
         )
+    except OSError as e:
+        raise click.ClickException(f"cannot create key file {out}: {e}")
     try:
         os.write(fd, (key.privkey.hex() + "\n").encode("ascii"))
     finally:

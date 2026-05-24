@@ -95,10 +95,20 @@ def verify_full(
                 notes.append("Merkle inclusion proof INVALID")
 
     # 4. Optional: checkpoint event binds the proof root + epoch + leaf count.
+    # If a checkpoint is supplied without a proof, we CANNOT bind the
+    # attestation digest to the checkpoint's root — supplying a checkpoint
+    # is therefore a request that the verifier confirm the binding, and
+    # without a proof that confirmation is impossible. Fail closed.
     checkpoint_ok: bool | None = None
     checkpoint_payload: dict | None = None
     if checkpoint_event is not None:
         checkpoint_ok = True
+        if proof is None:
+            notes.append(
+                "Checkpoint supplied without inclusion proof; cannot bind "
+                "attestation digest to the checkpoint's Merkle root"
+            )
+            checkpoint_ok = False
         if not checkpoint_event.verify():
             notes.append("Checkpoint Schnorr signature INVALID")
             checkpoint_ok = False
@@ -129,17 +139,28 @@ def verify_full(
                     checkpoint_ok = False
 
     # 5. Optional: cross-check the on-chain OP_RETURN against the checkpoint.
+    # Same binding requirement as checkpoint: without a proof, the OP_RETURN
+    # root cannot be tied to the attestation digest. Fail closed.
     anchor_ok: bool | None = None
     if anchor_raw_tx_hex is not None:
         anchor_ok = True
+        if proof is None:
+            notes.append(
+                "Anchor tx supplied without inclusion proof; cannot bind "
+                "attestation digest to the on-chain Merkle root"
+            )
+            anchor_ok = False
+        payload: bytes | None
         try:
             payload = extract_op_return_from_raw_tx(anchor_raw_tx_hex)
-        except ValueError:
+        except (ValueError, IndexError) as e:
             payload = None
-        if payload is None:
+            notes.append(f"Anchor tx parsing failed: {e}")
+            anchor_ok = False
+        if payload is None and anchor_ok is not False:
             notes.append("Anchor tx has no OP_RETURN output")
             anchor_ok = False
-        else:
+        if payload is not None:
             try:
                 parsed = parse_op_return_payload(payload)
             except ValueError as e:

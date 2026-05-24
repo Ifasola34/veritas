@@ -123,48 +123,92 @@ def derive_anchor_pubkey(privkey: bytes) -> bytes:
     return PrivateKey(privkey).public_key.format(compressed=True)
 
 
+# Sanity caps. Real Bitcoin txs are bounded by consensus (MAX_BLOCK_WEIGHT ~4M
+# weight units); these caps are loose enough to never reject a real tx but
+# tight enough to short-circuit adversarial inputs before they consume CPU.
+_MAX_INS = 10_000
+_MAX_OUTS = 10_000
+_MAX_SCRIPT_LEN = 100_000
+
+
 def extract_op_return_from_raw_tx(raw_hex: str) -> bytes | None:
     """Walk a serialized (segwit or legacy) tx and return the OP_RETURN data
     payload (without the OP_RETURN/push opcodes), or None if no OP_RETURN
     output is present. Used by verifiers cross-checking checkpoint roots
     against the on-chain anchor.
+
+    Raises ValueError on malformed or out-of-bounds hex. Caller-supplied
+    raw_hex is treated as untrusted: every read is bounds-checked, varint
+    counts are capped, and scripts longer than 100KB are rejected so an
+    adversarial tx cannot DoS the verifier.
     """
-    tx = bytes.fromhex(raw_hex)
+    try:
+        tx = bytes.fromhex(raw_hex)
+    except ValueError as e:
+        raise ValueError(f"raw_hex is not valid hex: {e}")
+    n = len(tx)
+
+    def _need(pos: int, want: int) -> None:
+        if pos + want > n:
+            raise ValueError(
+                f"truncated tx: need {want} bytes at offset {pos}, have {n - pos}"
+            )
+
+    def _read_varint(pos: int) -> tuple[int, int]:
+        _need(pos, 1)
+        first = tx[pos]
+        if first < 0xFD:
+            return first, pos + 1
+        if first == 0xFD:
+            _need(pos + 1, 2)
+            return int.from_bytes(tx[pos + 1:pos + 3], "little"), pos + 3
+        if first == 0xFE:
+            _need(pos + 1, 4)
+            return int.from_bytes(tx[pos + 1:pos + 5], "little"), pos + 5
+        _need(pos + 1, 8)
+        return int.from_bytes(tx[pos + 1:pos + 9], "little"), pos + 9
+
+    _need(0, 4)
     cursor = 4  # skip version
-    # Detect segwit marker+flag
-    if len(tx) >= cursor + 2 and tx[cursor] == 0x00 and tx[cursor + 1] == 0x01:
+    # Detect segwit marker+flag.
+    if n >= cursor + 2 and tx[cursor] == 0x00 and tx[cursor + 1] == 0x01:
         cursor += 2
 
-    def read_varint(buf: bytes, pos: int) -> tuple[int, int]:
-        n = buf[pos]
-        if n < 0xFD:
-            return n, pos + 1
-        if n == 0xFD:
-            return int.from_bytes(buf[pos + 1:pos + 3], "little"), pos + 3
-        if n == 0xFE:
-            return int.from_bytes(buf[pos + 1:pos + 5], "little"), pos + 5
-        return int.from_bytes(buf[pos + 1:pos + 9], "little"), pos + 9
-
-    n_in, cursor = read_varint(tx, cursor)
+    n_in, cursor = _read_varint(cursor)
+    if n_in > _MAX_INS:
+        raise ValueError(f"input count {n_in} exceeds cap {_MAX_INS}")
     for _ in range(n_in):
+        _need(cursor, 36)
         cursor += 36  # outpoint
-        slen, cursor = read_varint(tx, cursor)
+        slen, cursor = _read_varint(cursor)
+        if slen > _MAX_SCRIPT_LEN:
+            raise ValueError(f"scriptSig length {slen} exceeds cap")
+        _need(cursor, slen + 4)
         cursor += slen + 4  # scriptSig + sequence
 
-    n_out, cursor = read_varint(tx, cursor)
+    n_out, cursor = _read_varint(cursor)
+    if n_out > _MAX_OUTS:
+        raise ValueError(f"output count {n_out} exceeds cap {_MAX_OUTS}")
     for _ in range(n_out):
+        _need(cursor, 8)
         cursor += 8  # value
-        slen, cursor = read_varint(tx, cursor)
+        slen, cursor = _read_varint(cursor)
+        if slen > _MAX_SCRIPT_LEN:
+            raise ValueError(f"scriptPubKey length {slen} exceeds cap")
+        _need(cursor, slen)
         script = tx[cursor:cursor + slen]
         cursor += slen
         if script and script[0] == 0x6A:  # OP_RETURN
             if len(script) < 2:
                 continue
-            # Push opcode parsing: direct (0x01..0x4b), OP_PUSHDATA1 (0x4c)
             push = script[1]
             if 1 <= push <= 0x4B and len(script) == 2 + push:
                 return script[2:]
-            if push == 0x4C and len(script) >= 3 and len(script) == 3 + script[2]:
+            if (
+                push == 0x4C
+                and len(script) >= 3
+                and len(script) == 3 + script[2]
+            ):
                 return script[3:]
     return None
 

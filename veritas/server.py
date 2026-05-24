@@ -46,21 +46,42 @@ MAX_REQUEST_BODY_BYTES = 64 * 1024
 def _load_l402_secret() -> bytes:
     """Source the L402 HMAC secret from the environment.
 
-    In production (VERITAS_ENV=prod) a missing secret is fatal — refuses
-    to start with a default. In dev mode an ephemeral random secret is
-    generated per-process so paywall tags from one run can't authorize
-    another. NEVER ship a hardcoded constant.
+    Accepted formats:
+      - `hex:<hex-encoded bytes>` — decoded as hex. Use this for binary
+        secrets generated with `openssl rand -hex 32`.
+      - any other string — used verbatim as UTF-8 bytes (passphrase).
+
+    The explicit prefix prevents the silent entropy-halving bug where an
+    all-hex passphrase gets accidentally hex-decoded. In production
+    (VERITAS_ENV=prod) a missing secret is fatal. In dev mode an
+    ephemeral random secret is generated per-process so paywall tags
+    from one run can't authorize another. NEVER ship a hardcoded constant.
     """
     raw = os.environ.get("VERITAS_L402_SECRET")
     if raw:
-        try:
-            return bytes.fromhex(raw) if all(c in "0123456789abcdefABCDEF" for c in raw) else raw.encode("utf-8")
-        except ValueError:
-            return raw.encode("utf-8")
+        if raw.startswith("hex:"):
+            try:
+                decoded = bytes.fromhex(raw[4:])
+            except ValueError as e:
+                raise RuntimeError(
+                    f"VERITAS_L402_SECRET has hex: prefix but body is not valid hex: {e}"
+                )
+            if len(decoded) < 16:
+                raise RuntimeError(
+                    f"VERITAS_L402_SECRET decoded to {len(decoded)} bytes; "
+                    "use at least 16 (32+ recommended)"
+                )
+            return decoded
+        if len(raw.encode("utf-8")) < 16:
+            raise RuntimeError(
+                "VERITAS_L402_SECRET passphrase is too short; "
+                "use at least 16 bytes (or 'hex:' + 32 random bytes)"
+            )
+        return raw.encode("utf-8")
     if os.environ.get("VERITAS_ENV") == "prod":
         raise RuntimeError(
-            "VERITAS_L402_SECRET must be set (32+ random bytes, hex-encoded) "
-            "when VERITAS_ENV=prod"
+            "VERITAS_L402_SECRET must be set when VERITAS_ENV=prod "
+            "(e.g. VERITAS_L402_SECRET=\"hex:$(openssl rand -hex 32)\")"
         )
     return secrets.token_bytes(32)
 
@@ -83,13 +104,6 @@ def _make_ln_backend() -> LightningBackend:
     raise RuntimeError(f"unsupported VERITAS_LN_BACKEND: {name!r}")
 
 
-# ----- module-level singleton, initialized by `create_app` -----------
-
-_ORACLE: Oracle | None = None
-_LN: LightningBackend = DeterministicMockBackend()
-_L402_SECRET: bytes = b""
-
-
 class InferReq(BaseModel):
     # `model_config` reserved by Pydantic v2; using model_config to silence warnings
     model_config = {"protected_namespaces": ()}
@@ -97,31 +111,40 @@ class InferReq(BaseModel):
     input: str = Field(..., max_length=MAX_INFER_INPUT_BYTES)
 
 
-def get_oracle() -> Oracle:
-    if _ORACLE is None:
-        raise RuntimeError("oracle not initialized; call create_app first")
-    return _ORACLE
-
-
 def create_app(oracle: Oracle) -> FastAPI:
-    global _ORACLE, _LN, _L402_SECRET
-    _ORACLE = oracle
-    _LN = _make_ln_backend()
-    _L402_SECRET = _load_l402_secret()
-    app = FastAPI(title="VERITAS Oracle", version="0.1.0")
+    """Build an isolated FastAPI app for an oracle.
 
-    # Reject oversize bodies before they hit any route handler.
+    Each app owns its own Lightning backend, L402 HMAC secret, and
+    oracle reference on `app.state`. Two apps built in the same process
+    do NOT share state and cannot invalidate each other's macaroons.
+    """
+    app = FastAPI(title="VERITAS Oracle", version="0.1.0")
+    app.state.oracle = oracle
+    app.state.ln = _make_ln_backend()
+    app.state.l402_secret = _load_l402_secret()
+
+    # Reject oversize bodies before they hit any route handler. Requests
+    # with no Content-Length (e.g. chunked transfer encoding) are rejected
+    # for POST/PUT/PATCH so an attacker cannot stream gigabytes through
+    # the middleware unnoticed.
     @app.middleware("http")
     async def _limit_body(request: Request, call_next):
-        cl = request.headers.get("content-length")
-        if cl is not None:
+        if request.method in ("POST", "PUT", "PATCH"):
+            cl = request.headers.get("content-length")
+            if cl is None:
+                return JSONResponse(
+                    {"error": "Content-Length header required"},
+                    status_code=411,
+                )
             try:
                 if int(cl) > MAX_REQUEST_BODY_BYTES:
                     return JSONResponse(
                         {"error": "request body too large"}, status_code=413
                     )
             except ValueError:
-                pass
+                return JSONResponse(
+                    {"error": "invalid Content-Length"}, status_code=400
+                )
         return await call_next(request)
 
     @app.get("/health")
@@ -156,12 +179,15 @@ def create_app(oracle: Oracle) -> FastAPI:
 
     @app.post("/infer/premium")
     def infer_premium(
+        request: Request,
         req: InferReq,
         authorization: str | None = Header(default=None),
     ) -> Response:
+        secret = request.app.state.l402_secret
+        ln = request.app.state.ln
         resource_id = f"premium:{req.model}"
         if authorization and authorize(
-            _L402_SECRET, _LN,
+            secret, ln,
             auth_header_value=authorization,
             resource_id=resource_id,
         ):
@@ -175,7 +201,7 @@ def create_app(oracle: Oracle) -> FastAPI:
                 "nostr": evt.to_dict(),
             })
         # No / bad auth -> issue a challenge.
-        chal = make_challenge(_L402_SECRET, _LN, resource_id=resource_id,
+        chal = make_challenge(secret, ln, resource_id=resource_id,
                               amount_msat=1000)
         challenge_body: dict[str, Any] = {
             "macaroon_token": chal.macaroon_token,
@@ -192,13 +218,13 @@ def create_app(oracle: Oracle) -> FastAPI:
 
     if os.environ.get("VERITAS_DEMO") == "1":
         @app.post("/demo/reveal/{payment_hash}")
-        def demo_reveal(payment_hash: str) -> dict[str, str]:
+        def demo_reveal(request: Request, payment_hash: str) -> dict[str, str]:
             """DEMO ONLY: pretend to pay an invoice and reveal the preimage.
 
             Mounted only when VERITAS_DEMO=1. In production this route
             does not exist; clients must pay the invoice for real.
             """
-            reveal = getattr(_LN, "reveal_preimage", None)
+            reveal = getattr(request.app.state.ln, "reveal_preimage", None)
             if reveal is None:
                 raise HTTPException(404, "demo reveal not supported by this backend")
             try:

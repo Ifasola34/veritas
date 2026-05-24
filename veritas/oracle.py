@@ -306,11 +306,13 @@ class Oracle:
             checkpoint_event: NostrEvent | None = None
             anchor_tx = None
             started_at = int(time.time())
+            expected_leaf_count: int | None = None
             if closed:
                 try:
                     cp = json.loads(cp_path.read_text())
                     root_hex = cp.get("root")
                     started_at = int(cp.get("closed_at", started_at))
+                    expected_leaf_count = cp.get("leaf_count")
                     if cp.get("checkpoint_event"):
                         ce = cp["checkpoint_event"]
                         checkpoint_event = NostrEvent(
@@ -332,6 +334,23 @@ class Oracle:
                         )
                 except (json.JSONDecodeError, KeyError, ValueError, OSError):
                     closed = False  # treat torn checkpoint as still-open
+
+            # Refuse to serve a closed epoch whose on-disk attestation count
+            # disagrees with the signed checkpoint leaf_count — otherwise
+            # inclusion_proof would silently rebuild a Merkle tree from a
+            # truncated leaf set whose root differs from what's anchored.
+            if (
+                closed
+                and expected_leaf_count is not None
+                and expected_leaf_count != len(attestations)
+            ):
+                raise RuntimeError(
+                    f"epoch {n} on disk has {len(attestations)} attestations "
+                    f"but checkpoint signed for {expected_leaf_count}; "
+                    "refusing to load. Inspect "
+                    f"{atts_dir}/ and either restore missing files or "
+                    "rewrite the checkpoint."
+                )
 
             ep = Epoch(
                 number=n,
