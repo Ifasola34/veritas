@@ -31,6 +31,8 @@ from .lightning import (
     DeterministicMockBackend,
     L402Challenge,
     LightningBackend,
+    LndRestBackend,
+    PhoenixdBackend,
     authorize,
     make_challenge,
 )
@@ -89,18 +91,44 @@ def _load_l402_secret() -> bytes:
 def _make_ln_backend() -> LightningBackend:
     """Pick a Lightning backend based on the environment.
 
-    Default is the in-process mock. In prod, only an explicitly named
-    real backend is accepted; falling back to the mock would silently
-    leave the paywall un-enforceable.
+    Env vars:
+      VERITAS_LN_BACKEND       mock (default) | lnd | phoenixd
+      VERITAS_LND_URL          e.g. https://127.0.0.1:8080
+      VERITAS_LND_MACAROON     hex-encoded admin.macaroon
+      VERITAS_LND_CERT_PATH    path to lnd's tls.cert (optional)
+      VERITAS_PHOENIXD_URL     e.g. http://127.0.0.1:9740
+      VERITAS_PHOENIXD_PASSWORD  http-password from ~/.phoenix/phoenix.conf
+
+    The mock backend is refused when VERITAS_ENV=prod; falling back to
+    the mock would silently leave the paywall un-enforceable.
     """
     name = os.environ.get("VERITAS_LN_BACKEND", "mock").lower()
     if name == "mock":
         if os.environ.get("VERITAS_ENV") == "prod":
             raise RuntimeError(
                 "refusing to start with VERITAS_LN_BACKEND=mock in production; "
-                "wire a real Lightning backend"
+                "wire a real Lightning backend (lnd or phoenixd)"
             )
         return DeterministicMockBackend()
+    if name == "lnd":
+        url = os.environ.get("VERITAS_LND_URL")
+        macaroon = os.environ.get("VERITAS_LND_MACAROON")
+        cert_path = os.environ.get("VERITAS_LND_CERT_PATH")
+        if not url or not macaroon:
+            raise RuntimeError(
+                "VERITAS_LN_BACKEND=lnd requires VERITAS_LND_URL and "
+                "VERITAS_LND_MACAROON (hex-encoded)"
+            )
+        return LndRestBackend(url=url, macaroon_hex=macaroon, tls_cert_path=cert_path)
+    if name == "phoenixd":
+        url = os.environ.get("VERITAS_PHOENIXD_URL")
+        password = os.environ.get("VERITAS_PHOENIXD_PASSWORD")
+        if not url or not password:
+            raise RuntimeError(
+                "VERITAS_LN_BACKEND=phoenixd requires VERITAS_PHOENIXD_URL and "
+                "VERITAS_PHOENIXD_PASSWORD"
+            )
+        return PhoenixdBackend(url=url, password=password)
     raise RuntimeError(f"unsupported VERITAS_LN_BACKEND: {name!r}")
 
 

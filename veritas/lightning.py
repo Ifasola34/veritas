@@ -21,7 +21,10 @@ import hmac
 import json
 import os
 import secrets
+import ssl
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -224,3 +227,160 @@ def authorize(
     if not saw_exp:
         return False
     return True
+
+
+# ---------- Real Lightning backends -------------------------------
+#
+# Both backends speak HTTP/JSON and validate the same LightningBackend
+# protocol (create_invoice + check_paid). Tests mock urllib.request so
+# the suite stays offline. To run live, set the env vars in
+# server.py:_make_ln_backend.
+
+
+def _make_ssl_context(cert_path: str | None) -> ssl.SSLContext | None:
+    """Build an SSL context that trusts a specific self-signed cert.
+
+    LND ships a self-signed tls.cert by default; we point Python at it
+    via `cafile=` so the connection verifies against that single cert
+    rather than the system CA bundle. Returning None lets urllib fall
+    back to default verification (good for nodes behind a real CA).
+    """
+    if not cert_path:
+        return None
+    ctx = ssl.create_default_context(cafile=cert_path)
+    return ctx
+
+
+class LndRestBackend:
+    """LND REST API (https://api.lightning.community/rest/).
+
+    Endpoints used:
+      POST /v1/invoices            — create invoice
+      GET  /v1/invoice/{r_hash}    — query settlement status
+
+    Auth is a hex-encoded macaroon in the Grpc-Metadata-macaroon header.
+    Tip: `xxd -ps -u -c 1000 ~/.lnd/data/chain/bitcoin/signet/admin.macaroon`
+    """
+
+    name = "lnd"
+
+    def __init__(
+        self,
+        url: str,
+        macaroon_hex: str,
+        tls_cert_path: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        # Normalize trailing slash so f-strings produce clean paths.
+        self.url = url.rstrip("/")
+        self.macaroon_hex = macaroon_hex
+        self.timeout = timeout_seconds
+        self._ssl_ctx = _make_ssl_context(tls_cert_path)
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+        url = f"{self.url}{path}"
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(
+            url, data=data, method=method,
+            headers={
+                "Grpc-Metadata-macaroon": self.macaroon_hex,
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(
+            req, timeout=self.timeout, context=self._ssl_ctx,
+        ) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
+        # LND wants value (sats) for typical mainnet/testnet flows;
+        # using value_msat is supported and avoids truncation.
+        resp = self._request("POST", "/v1/invoices", {
+            "value_msat": str(amount_msat),
+            "memo": memo,
+            "expiry": "3600",
+        })
+        # LND returns r_hash as base64. We need hex for the protocol.
+        r_hash_b64 = resp["r_hash"]
+        r_hash_hex = base64.b64decode(r_hash_b64).hex()
+        bolt11 = resp["payment_request"]
+        return LnInvoice(
+            bolt11=bolt11, payment_hash=r_hash_hex, amount_msat=amount_msat,
+        )
+
+    def check_paid(self, payment_hash: str) -> bool:
+        # LND accepts the r_hash as a hex string in the URL path.
+        try:
+            resp = self._request("GET", f"/v1/invoice/{payment_hash}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            raise
+        # LND returns invoice.state in {OPEN, SETTLED, CANCELED, ACCEPTED}.
+        return resp.get("state") == "SETTLED" or bool(resp.get("settled"))
+
+
+class PhoenixdBackend:
+    """Phoenixd HTTP API (https://phoenix.acinq.co/server/api).
+
+    Endpoints used:
+      POST /createinvoice
+        form: amountSat=<n>&description=<...>
+      GET  /payments/incoming/{paymentHash}
+
+    Auth is HTTP Basic with empty username and the http-password from
+    ~/.phoenix/phoenix.conf.
+    """
+
+    name = "phoenixd"
+
+    def __init__(
+        self,
+        url: str,
+        password: str,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        self.url = url.rstrip("/")
+        self.password = password
+        self.timeout = timeout_seconds
+        token = base64.b64encode(f":{password}".encode()).decode()
+        self._auth_header = f"Basic {token}"
+
+    def _request(
+        self, method: str, path: str,
+        form_body: dict | None = None,
+    ) -> dict:
+        url = f"{self.url}{path}"
+        data = None
+        headers = {"Authorization": self._auth_header}
+        if form_body is not None:
+            data = "&".join(
+                f"{k}={urllib.request.quote(str(v))}" for k, v in form_body.items()
+            ).encode("ascii")
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
+        # Phoenixd expects amountSat. Round up so we never under-charge.
+        amount_sat = max(1, (amount_msat + 999) // 1000)
+        resp = self._request("POST", "/createinvoice", {
+            "amountSat": amount_sat,
+            "description": memo,
+        })
+        # Response: {"serialized": "<bolt11>", "paymentHash": "<hex>", ...}
+        return LnInvoice(
+            bolt11=resp["serialized"],
+            payment_hash=resp["paymentHash"],
+            amount_msat=amount_sat * 1000,
+        )
+
+    def check_paid(self, payment_hash: str) -> bool:
+        try:
+            resp = self._request("GET", f"/payments/incoming/{payment_hash}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            raise
+        return bool(resp.get("isPaid"))
