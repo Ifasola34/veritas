@@ -53,7 +53,7 @@ class NostrEvent:
             self.content,
         ]
         return json.dumps(
-            payload, separators=(",", ","), ensure_ascii=False
+            payload, separators=(",", ":"), ensure_ascii=False
         ).encode("utf-8")
 
     def compute_id(self) -> str:

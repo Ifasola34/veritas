@@ -92,53 +92,14 @@ class LightningBackend(Protocol):
 
 # ---------- Mock backend (deterministic preimages) ----------
 
-class MockLightningBackend:
-    """Issues fake invoices and lets clients 'pay' by computing the
-    preimage from the payment hash via a known seed.
-
-    Production code MUST NOT use this. It exists so:
-      (a) the test suite is offline and reproducible,
-      (b) the L402 server flow is exercised end-to-end.
-    """
-
-    def __init__(self, demo_seed: bytes = b"VRT1-demo-only-not-secure") -> None:
-        self._seed = demo_seed
-        self._paid: set[str] = set()
-        self._issued: dict[str, LnInvoice] = {}
-
-    def _preimage_for(self, payment_hash_hex: str) -> bytes:
-        return hmac.new(self._seed, bytes.fromhex(payment_hash_hex), hashlib.sha256).digest()
-
-    def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
-        # In a real backend, the node picks the preimage and reveals only
-        # the payment_hash. Here we go backwards: pick a preimage = HMAC(seed, random),
-        # and let the payment_hash be its SHA-256.
-        nonce = secrets.token_bytes(16)
-        preimage = hmac.new(self._seed, nonce, hashlib.sha256).digest()
-        payment_hash = hashlib.sha256(preimage).hexdigest()
-        # We need check_paid to be derivable from payment_hash alone — so we
-        # recompute preimage from payment_hash via a *different* seed deterministically.
-        # Store the mapping; demo clients call mock_pay() to mark it paid.
-        bolt11 = f"lnmock1{amount_msat}_{payment_hash[:20]}"
-        inv = LnInvoice(bolt11=bolt11, payment_hash=payment_hash, amount_msat=amount_msat)
-        self._issued[payment_hash] = inv
-        return inv
-
-    def mock_pay(self, payment_hash: str) -> str:
-        """Demo helper: simulate the client paying. Returns the preimage hex."""
-        if payment_hash not in self._issued:
-            raise KeyError("unknown invoice")
-        # The preimage that hashes to payment_hash: we *should* have stored it.
-        # For demo simplicity, scan from a deterministic seed until match — or,
-        # better, store at create time. Fix: store at create time.
-        raise NotImplementedError("use DeterministicMockBackend instead")
-
-    def check_paid(self, payment_hash: str) -> bool:
-        return payment_hash in self._paid
-
-
 class DeterministicMockBackend:
-    """Cleaner mock: we store both halves so the demo can pay invoices."""
+    """In-process mock: stores preimages so the demo flow can settle invoices.
+
+    The `bolt11` field is a placeholder string, NOT a parseable BOLT-11
+    invoice — no real Lightning wallet can pay it. Tests and the demo
+    server use reveal_preimage() to simulate settlement. Wire a real
+    backend (LND, CLN, Phoenixd, LNbits) for production.
+    """
 
     def __init__(self) -> None:
         self._issued: dict[str, tuple[LnInvoice, bytes]] = {}
@@ -147,7 +108,7 @@ class DeterministicMockBackend:
     def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
         preimage = os.urandom(32)
         payment_hash = hashlib.sha256(preimage).hexdigest()
-        bolt11 = f"lnmock1{amount_msat}m{payment_hash[:20]}"
+        bolt11 = f"lnmock-placeholder-{amount_msat}msat-{payment_hash[:16]}"
         inv = LnInvoice(bolt11=bolt11, payment_hash=payment_hash, amount_msat=amount_msat)
         self._issued[payment_hash] = (inv, preimage)
         return inv
@@ -204,8 +165,26 @@ def authorize(
     *,
     auth_header_value: str,
     resource_id: str,
+    require_backend_settled: bool = False,
 ) -> bool:
-    """Validate an Authorization: L402 <macaroon>:<preimage> header."""
+    """Validate an Authorization: L402 <macaroon>:<preimage> header.
+
+    Authorization requires ALL of:
+      1. Header well-formed.
+      2. Macaroon HMAC tag valid under `secret`.
+      3. Macaroon identifier matches `resource_id`.
+      4. SHA-256(preimage) == macaroon.payment_hash.
+      5. Every exp= caveat is in the future.
+
+    Possession of a preimage that hashes to the macaroon's payment_hash
+    is itself the cryptographic proof of payment in L402; revealing it
+    requires actually paying the invoice. The LN backend's check_paid()
+    is consulted only when `require_backend_settled=True` (real LSPs
+    where revocation/double-spend tracking matters); in default mode an
+    unsettled-but-cryptographically-proven preimage is still rejected
+    if any caveat fails. The check_paid result NEVER grants access on
+    its own, and never bypasses caveat enforcement.
+    """
     if not auth_header_value.startswith("L402 "):
         return False
     creds = auth_header_value[len("L402 "):]
@@ -220,19 +199,14 @@ def authorize(
         return False
     if m.identifier != resource_id:
         return False
-    # Check preimage hashes to the macaroon's payment_hash.
     try:
         preimage = bytes.fromhex(preimage_hex)
     except ValueError:
         return False
     if hashlib.sha256(preimage).hexdigest() != m.payment_hash:
         return False
-    # Mark the invoice paid in our LN backend's view (defense in depth).
-    if not ln.check_paid(m.payment_hash):
-        # Some real backends require explicit settlement check; the
-        # preimage already proves payment, but we honor backend truth.
-        return True
-    # Caveat expiration check.
+    if require_backend_settled and not ln.check_paid(m.payment_hash):
+        return False
     now = int(time.time())
     for c in m.caveats:
         if c.startswith("exp="):

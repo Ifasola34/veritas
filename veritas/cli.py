@@ -36,12 +36,23 @@ def cli() -> None:
 def keygen(out: str) -> None:
     """Generate a fresh oracle BIP-340 keypair."""
     key = OracleKey.generate()
-    Path(out).write_text(key.privkey.hex() + "\n")
-    os.chmod(out, 0o600)
+    # Atomic create with restrictive mode: refuses to overwrite, no
+    # TOCTOU window where another local process can read the privkey.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(out, flags, 0o600)
+    except FileExistsError:
+        raise click.ClickException(
+            f"refusing to overwrite existing key file: {out}"
+        )
+    try:
+        os.write(fd, (key.privkey.hex() + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
     console.print(Panel.fit(
         f"[bold green]Key created[/bold green]\n"
         f"x-only pubkey: [yellow]{key.xonly_pubkey_hex}[/yellow]\n"
-        f"saved private key → {out}"
+        f"saved private key → {out} (mode 0600)"
     ))
 
 
@@ -124,35 +135,68 @@ def close(key_path: str, data_dir: str) -> None:
 @click.option("--event-file", type=click.Path(exists=True), required=False)
 @click.option("--proof-file", type=click.Path(exists=True), required=False)
 @click.option("--checkpoint-file", type=click.Path(exists=True), required=False)
+@click.option("--anchor-raw-hex", type=str, required=False,
+              help="Raw Bitcoin anchor tx hex (e.g. from a block explorer); "
+                   "verifier cross-checks OP_RETURN against the checkpoint.")
 def verify(attestation_file: str, event_file: str | None,
-           proof_file: str | None, checkpoint_file: str | None) -> None:
-    """Verify a saved attestation (and optionally proof + checkpoint)."""
-    signed = SignedAttestation.from_json(Path(attestation_file).read_text())
+           proof_file: str | None, checkpoint_file: str | None,
+           anchor_raw_hex: str | None) -> None:
+    """Verify a saved attestation (and optionally proof + checkpoint + anchor tx)."""
+    def _load_nostr_event(d: dict) -> NostrEvent:
+        # Filter to known fields so future schema additions don't crash.
+        known = {"pubkey", "created_at", "kind", "tags", "content", "id", "sig"}
+        missing = {"pubkey", "created_at", "kind"} - d.keys()
+        if missing:
+            raise click.ClickException(f"event missing required fields: {sorted(missing)}")
+        return NostrEvent(**{k: v for k, v in d.items() if k in known})
+
+    try:
+        signed = SignedAttestation.from_json(Path(attestation_file).read_text())
+    except (ValueError, KeyError) as e:
+        raise click.ClickException(f"invalid attestation file: {e}")
+
     evt = None
     if event_file:
-        d = json.loads(Path(event_file).read_text())
-        evt = NostrEvent(**d)
+        try:
+            evt = _load_nostr_event(json.loads(Path(event_file).read_text()))
+        except (ValueError, json.JSONDecodeError) as e:
+            raise click.ClickException(f"invalid event file: {e}")
+
     proof = None
     if proof_file:
-        d = json.loads(Path(proof_file).read_text())
-        proof = MerkleProof(
-            leaf=bytes.fromhex(d["leaf_hex"]),
-            siblings=[bytes.fromhex(s) for s in d["siblings_hex"]],
-            directions=list(d["directions"]),
-            root=bytes.fromhex(d["root_hex"]),
-        )
-    cp_event, cp_root = None, None
+        try:
+            d = json.loads(Path(proof_file).read_text())
+            proof = MerkleProof(
+                leaf=bytes.fromhex(d["leaf_hex"]),
+                siblings=[bytes.fromhex(s) for s in d["siblings_hex"]],
+                directions=list(d["directions"]),
+                root=bytes.fromhex(d["root_hex"]),
+                size=int(d["size"]),
+                index=int(d["index"]),
+            )
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            raise click.ClickException(f"invalid proof file: {e}")
+
+    cp_event = None
+    anchor_hex = anchor_raw_hex
     if checkpoint_file:
-        d = json.loads(Path(checkpoint_file).read_text())
-        cp_root = d.get("root")
-        if "checkpoint_event" in d and d["checkpoint_event"]:
-            cp_event = NostrEvent(**d["checkpoint_event"])
+        try:
+            d = json.loads(Path(checkpoint_file).read_text())
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"invalid checkpoint file: {e}")
+        if d.get("checkpoint_event"):
+            cp_event = _load_nostr_event(d["checkpoint_event"])
+        # If the local checkpoint file ships the anchor raw hex and the
+        # user didn't override via --anchor-raw-hex, use it.
+        if anchor_hex is None and d.get("anchor") and d["anchor"].get("raw_hex"):
+            anchor_hex = d["anchor"]["raw_hex"]
+
     r = verify_full(
         signed=signed,
         nostr_event=evt,
         proof=proof,
         checkpoint_event=cp_event,
-        checkpoint_root_hex=cp_root,
+        anchor_raw_tx_hex=anchor_hex,
     )
     t = Table(title="Verification result")
     t.add_column("check"); t.add_column("ok?")
@@ -161,6 +205,7 @@ def verify(attestation_file: str, event_file: str | None,
         ("nostr event", r.nostr_event_ok),
         ("merkle inclusion", r.merkle_ok),
         ("checkpoint", r.checkpoint_ok),
+        ("anchor OP_RETURN", r.anchor_ok),
     ]:
         if val is None:
             t.add_row(name, "[grey]n/a[/grey]")

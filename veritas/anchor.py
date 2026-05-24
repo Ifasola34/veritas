@@ -25,6 +25,9 @@ from coincurve import PrivateKey
 from . import PROTOCOL_TAG
 
 
+OP_RETURN_VERSION = 1
+
+
 # ---------- low-level encoding helpers ----------
 
 def _varint(n: int) -> bytes:
@@ -65,15 +68,105 @@ class AnchorTx:
 
 # ---------- builder ----------
 
-def build_op_return_payload(merkle_root: bytes, epoch: int) -> bytes:
-    """Serialize the OP_RETURN data: 4-byte tag || 32-byte root || 8-byte epoch."""
+def build_op_return_payload(
+    merkle_root: bytes, epoch: int, leaf_count: int
+) -> bytes:
+    """Serialize the OP_RETURN data.
+
+    Layout (49 bytes, fits in a single direct-push OP_RETURN):
+      tag(4) || version(1) || epoch(8 BE) || leaf_count(4 BE) || root(32)
+
+    Committing leaf_count on-chain lets verifiers reject Merkle proofs
+    whose claimed tree size disagrees with what the oracle anchored.
+    """
     if len(merkle_root) != 32:
         raise ValueError("merkle_root must be 32 bytes")
+    if not 0 <= leaf_count < 2**32:
+        raise ValueError("leaf_count out of range")
+    if not 0 <= epoch < 2**64:
+        raise ValueError("epoch out of range")
     return (
         PROTOCOL_TAG.encode("ascii")
-        + merkle_root
+        + bytes([OP_RETURN_VERSION])
         + epoch.to_bytes(8, "big")
+        + leaf_count.to_bytes(4, "big")
+        + merkle_root
     )
+
+
+def parse_op_return_payload(payload: bytes) -> dict:
+    """Inverse of build_op_return_payload. Raises ValueError on malformed input."""
+    if len(payload) != 49:
+        raise ValueError(f"OP_RETURN payload wrong length: {len(payload)} != 49")
+    tag = payload[:4]
+    if tag != PROTOCOL_TAG.encode("ascii"):
+        raise ValueError(f"unknown protocol tag: {tag!r}")
+    version = payload[4]
+    if version != OP_RETURN_VERSION:
+        raise ValueError(f"unsupported OP_RETURN version: {version}")
+    epoch = int.from_bytes(payload[5:13], "big")
+    leaf_count = int.from_bytes(payload[13:17], "big")
+    merkle_root = payload[17:49]
+    return {
+        "tag": tag.decode("ascii"),
+        "version": version,
+        "epoch": epoch,
+        "leaf_count": leaf_count,
+        "merkle_root": merkle_root,
+    }
+
+
+def derive_anchor_pubkey(privkey: bytes) -> bytes:
+    """Compressed (33-byte) secp256k1 pubkey for an anchor private key."""
+    if len(privkey) != 32:
+        raise ValueError("privkey must be 32 bytes")
+    return PrivateKey(privkey).public_key.format(compressed=True)
+
+
+def extract_op_return_from_raw_tx(raw_hex: str) -> bytes | None:
+    """Walk a serialized (segwit or legacy) tx and return the OP_RETURN data
+    payload (without the OP_RETURN/push opcodes), or None if no OP_RETURN
+    output is present. Used by verifiers cross-checking checkpoint roots
+    against the on-chain anchor.
+    """
+    tx = bytes.fromhex(raw_hex)
+    cursor = 4  # skip version
+    # Detect segwit marker+flag
+    if len(tx) >= cursor + 2 and tx[cursor] == 0x00 and tx[cursor + 1] == 0x01:
+        cursor += 2
+
+    def read_varint(buf: bytes, pos: int) -> tuple[int, int]:
+        n = buf[pos]
+        if n < 0xFD:
+            return n, pos + 1
+        if n == 0xFD:
+            return int.from_bytes(buf[pos + 1:pos + 3], "little"), pos + 3
+        if n == 0xFE:
+            return int.from_bytes(buf[pos + 1:pos + 5], "little"), pos + 5
+        return int.from_bytes(buf[pos + 1:pos + 9], "little"), pos + 9
+
+    n_in, cursor = read_varint(tx, cursor)
+    for _ in range(n_in):
+        cursor += 36  # outpoint
+        slen, cursor = read_varint(tx, cursor)
+        cursor += slen + 4  # scriptSig + sequence
+
+    n_out, cursor = read_varint(tx, cursor)
+    for _ in range(n_out):
+        cursor += 8  # value
+        slen, cursor = read_varint(tx, cursor)
+        script = tx[cursor:cursor + slen]
+        cursor += slen
+        if script and script[0] == 0x6A:  # OP_RETURN
+            if len(script) < 2:
+                continue
+            # Push opcode parsing: direct (0x01..0x4b), OP_PUSHDATA1 (0x4c)
+            push = script[1]
+            if 1 <= push <= 0x4B and len(script) == 2 + push:
+                return script[2:]
+            if push == 0x4C and len(script) >= 3 and len(script) == 3 + script[2]:
+                return script[3:]
+    return None
 
 
 def _p2wpkh_script(pubkey_compressed: bytes) -> bytes:
@@ -97,6 +190,7 @@ def build_anchor_tx(
     privkey: bytes,
     merkle_root: bytes,
     epoch: int,
+    leaf_count: int,
     fee_sats: int = 500,
     change_pubkey_compressed: bytes | None = None,
 ) -> AnchorTx:
@@ -105,14 +199,25 @@ def build_anchor_tx(
     Caller is responsible for ensuring `utxo.value_sats >= fee_sats`.
     The output of the OP_RETURN is 0 sats (data carrier).
 
+    The UTXO's pubkey MUST match the supplied privkey — otherwise the
+    witness signature will not satisfy the input's scriptPubKey and the
+    tx will be rejected by every node. We enforce this rather than build
+    a silently-invalid tx.
+
     Returns the serialized transaction and its txid. NOT broadcast.
     """
     if len(privkey) != 32:
         raise ValueError("privkey must be 32 bytes")
+    derived_pk = derive_anchor_pubkey(privkey)
+    if utxo.pubkey_compressed != derived_pk:
+        raise ValueError(
+            "utxo.pubkey_compressed does not match the privkey; "
+            "anchor would build an unspendable transaction"
+        )
     if change_pubkey_compressed is None:
         change_pubkey_compressed = utxo.pubkey_compressed
 
-    payload = build_op_return_payload(merkle_root, epoch)
+    payload = build_op_return_payload(merkle_root, epoch, leaf_count)
     op_return_spk = _op_return_script(payload)
     change_value = utxo.value_sats - fee_sats
     if change_value < 0:

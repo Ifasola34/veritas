@@ -48,7 +48,8 @@ def test_attest_close_verify(tmp_path: Path):
     assert epoch.anchor_tx is not None
     assert epoch.anchor_tx.txid
 
-    # Every attestation must verify under full pipeline.
+    # Every attestation must verify under the full pipeline, including
+    # the on-chain OP_RETURN cross-check via the anchor tx hex.
     for i, signed in enumerate(signed_list):
         proof = oracle.inclusion_proof(epoch.number, i)
         assert proof is not None
@@ -58,9 +59,11 @@ def test_attest_close_verify(tmp_path: Path):
             nostr_event=events[i],
             proof=proof,
             checkpoint_event=epoch.checkpoint_event,
-            checkpoint_root_hex=epoch.root_hex,
+            anchor_raw_tx_hex=epoch.anchor_tx.raw_hex,
         )
         assert r.ok, r.notes
+        assert r.anchor_ok is True
+        assert r.checkpoint_ok is True
 
 
 def test_decoded_event_matches_attestation(tmp_path: Path):

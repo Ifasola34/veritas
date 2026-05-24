@@ -6,7 +6,13 @@ import os
 import pytest
 
 from veritas.crypto import sha256d
-from veritas.merkle import MerkleTree, MerkleProof, verify_merkle_proof
+from veritas.merkle import (
+    INTERNAL_PREFIX,
+    LEAF_PREFIX,
+    MerkleProof,
+    MerkleTree,
+    verify_merkle_proof,
+)
 
 
 def _digest(i: int) -> bytes:
@@ -22,10 +28,11 @@ def test_proves_every_leaf(n):
         assert verify_merkle_proof(p)
 
 
-def test_single_leaf_tree_has_leaf_as_root():
+def test_single_leaf_tree_has_prefixed_leaf_as_root():
     leaves = [_digest(0)]
     t = MerkleTree(leaves)
-    assert t.root == leaves[0]
+    # With RFC-6962 prefixes, single-leaf root is sha256d(0x00 || leaf).
+    assert t.root == sha256d(LEAF_PREFIX + leaves[0])
     p = t.prove(0)
     assert verify_merkle_proof(p)
 
@@ -39,6 +46,8 @@ def test_proof_rejects_wrong_root():
         siblings=p.siblings,
         directions=p.directions,
         root=b"\xff" * 32,
+        size=p.size,
+        index=p.index,
     )
     assert verify_merkle_proof(bad) is False
 
@@ -51,7 +60,7 @@ def test_proof_rejects_swapped_directions():
         pytest.skip("trivial tree")
     flipped = list(p.directions)
     flipped[0] = 1 - flipped[0]
-    bad = MerkleProof(p.leaf, p.siblings, flipped, p.root)
+    bad = MerkleProof(p.leaf, p.siblings, flipped, p.root, p.size, p.index)
     assert verify_merkle_proof(bad) is False
 
 
@@ -60,9 +69,36 @@ def test_rejects_non32_leaves():
         MerkleTree([b"short"])
 
 
+def test_proof_rejects_inconsistent_size():
+    leaves = [_digest(i) for i in range(3)]
+    t = MerkleTree(leaves)
+    p = t.prove(1)
+    # Inflate size to a value whose expected depth differs.
+    bad = MerkleProof(p.leaf, p.siblings, p.directions, p.root, size=100, index=p.index)
+    assert verify_merkle_proof(bad) is False
+
+
+def test_proof_rejects_index_out_of_range():
+    leaves = [_digest(i) for i in range(4)]
+    t = MerkleTree(leaves)
+    p = t.prove(1)
+    bad = MerkleProof(p.leaf, p.siblings, p.directions, p.root, size=p.size, index=99)
+    assert verify_merkle_proof(bad) is False
+
+
 def test_bitcoin_style_odd_duplication():
-    # 3 leaves: hash should equal hash(hash(a,b), hash(c,c))
+    # 3 leaves with RFC-6962 prefixes:
+    #   root = H_int(H_int(H_leaf(a), H_leaf(b)), H_int(H_leaf(c), H_leaf(c)))
     a, b, c = _digest(0), _digest(1), _digest(2)
     t = MerkleTree([a, b, c])
-    expected = sha256d(sha256d(a + b) + sha256d(c + c))
+    la, lb, lc = (
+        sha256d(LEAF_PREFIX + a),
+        sha256d(LEAF_PREFIX + b),
+        sha256d(LEAF_PREFIX + c),
+    )
+    expected = sha256d(
+        INTERNAL_PREFIX
+        + sha256d(INTERNAL_PREFIX + la + lb)
+        + sha256d(INTERNAL_PREFIX + lc + lc)
+    )
     assert t.root == expected
