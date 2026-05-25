@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -168,22 +169,33 @@ def verify(attestation_file: str, event_file: str | None,
             raise click.ClickException(f"event missing required fields: {sorted(missing)}")
         return NostrEvent(**{k: v for k, v in d.items() if k in known})
 
+    # Catch the full family of malformed-input exceptions: ValueError
+    # (bad hex / shape), KeyError (missing field), TypeError (e.g. JSON
+    # root is a list, so d["attestation"] crashes), AttributeError (e.g.
+    # d.get(...) on a non-dict). Round-3 fix mirrors vrt1-verifier and
+    # vrt1-agents — the narrow `(ValueError, KeyError)` clauses let
+    # malformed inputs escape as raw Python tracebacks.
     try:
         signed = SignedAttestation.from_json(Path(attestation_file).read_text())
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise click.ClickException(f"invalid attestation file: {e}")
 
     evt = None
     if event_file:
         try:
-            evt = _load_nostr_event(json.loads(Path(event_file).read_text()))
-        except (ValueError, json.JSONDecodeError) as e:
+            d = json.loads(Path(event_file).read_text())
+            if not isinstance(d, dict):
+                raise ValueError("event file root must be a JSON object")
+            evt = _load_nostr_event(d)
+        except (ValueError, json.JSONDecodeError, TypeError, AttributeError) as e:
             raise click.ClickException(f"invalid event file: {e}")
 
     proof = None
     if proof_file:
         try:
             d = json.loads(Path(proof_file).read_text())
+            if not isinstance(d, dict):
+                raise ValueError("proof file root must be a JSON object")
             proof = MerkleProof(
                 leaf=bytes.fromhex(d["leaf_hex"]),
                 siblings=[bytes.fromhex(s) for s in d["siblings_hex"]],
@@ -192,7 +204,7 @@ def verify(attestation_file: str, event_file: str | None,
                 size=int(d["size"]),
                 index=int(d["index"]),
             )
-        except (ValueError, KeyError, json.JSONDecodeError) as e:
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             raise click.ClickException(f"invalid proof file: {e}")
 
     cp_event = None
@@ -202,12 +214,26 @@ def verify(attestation_file: str, event_file: str | None,
             d = json.loads(Path(checkpoint_file).read_text())
         except json.JSONDecodeError as e:
             raise click.ClickException(f"invalid checkpoint file: {e}")
-        if d.get("checkpoint_event"):
-            cp_event = _load_nostr_event(d["checkpoint_event"])
-        # If the local checkpoint file ships the anchor raw hex and the
-        # user didn't override via --anchor-raw-hex, use it.
-        if anchor_hex is None and d.get("anchor") and d["anchor"].get("raw_hex"):
-            anchor_hex = d["anchor"]["raw_hex"]
+        if not isinstance(d, dict):
+            raise click.ClickException(
+                "checkpoint file root must be a JSON object"
+            )
+        try:
+            if d.get("checkpoint_event"):
+                ce = d["checkpoint_event"]
+                if not isinstance(ce, dict):
+                    raise click.ClickException(
+                        "checkpoint_event must be a JSON object"
+                    )
+                cp_event = _load_nostr_event(ce)
+            # If the local checkpoint file ships the anchor raw hex and the
+            # user didn't override via --anchor-raw-hex, use it.
+            if anchor_hex is None and d.get("anchor"):
+                anchor = d["anchor"]
+                if isinstance(anchor, dict) and anchor.get("raw_hex"):
+                    anchor_hex = anchor["raw_hex"]
+        except (TypeError, AttributeError) as e:
+            raise click.ClickException(f"invalid checkpoint file shape: {e}")
 
     r = verify_full(
         signed=signed,
@@ -237,6 +263,10 @@ def verify(attestation_file: str, event_file: str | None,
     console.print(Panel.fit(
         "[bold green]VERIFIED[/bold green]" if r.ok else "[bold red]REJECTED[/bold red]"
     ))
+    # Exit 0 on VERIFIED, 1 on REJECTED so CI/scripts can gate on the
+    # result (`veritas verify x.json && deploy.sh`). Round-3 fix mirrors
+    # vrt1-agents and vrt1-kwh which had the same regression.
+    sys.exit(0 if r.ok else 1)
 
 
 if __name__ == "__main__":

@@ -121,9 +121,22 @@ def verify_full(
             checkpoint_ok = False
         else:
             # Bind checkpoint to attestation by epoch.
-            if int(checkpoint_payload["epoch"]) != int(signed.attestation.epoch):
+            # `int(...)` raises TypeError on null/list/dict, not ValueError.
+            # A hostile checkpoint whose signed content has `epoch: null` or
+            # a list-shaped count would otherwise crash the verifier instead
+            # of returning ok=False.
+            try:
+                cp_epoch = int(checkpoint_payload["epoch"])
+            except (TypeError, ValueError):
                 notes.append(
-                    f"Checkpoint epoch {checkpoint_payload['epoch']} != "
+                    f"Checkpoint epoch field has invalid type/value: "
+                    f"{checkpoint_payload.get('epoch')!r}"
+                )
+                checkpoint_ok = False
+                cp_epoch = None
+            if cp_epoch is not None and cp_epoch != int(signed.attestation.epoch):
+                notes.append(
+                    f"Checkpoint epoch {cp_epoch} != "
                     f"attestation epoch {signed.attestation.epoch}"
                 )
                 checkpoint_ok = False
@@ -132,11 +145,19 @@ def verify_full(
                 if proof.root.hex() != checkpoint_payload["root"]:
                     notes.append("Merkle proof root != checkpoint signed root")
                     checkpoint_ok = False
-                if "count" in checkpoint_payload and (
-                    int(checkpoint_payload["count"]) != int(proof.size)
-                ):
-                    notes.append("Merkle proof size != checkpoint leaf count")
-                    checkpoint_ok = False
+                if "count" in checkpoint_payload:
+                    try:
+                        cp_count = int(checkpoint_payload["count"])
+                    except (TypeError, ValueError):
+                        notes.append(
+                            f"Checkpoint count field has invalid type/value: "
+                            f"{checkpoint_payload['count']!r}"
+                        )
+                        checkpoint_ok = False
+                        cp_count = None
+                    if cp_count is not None and cp_count != int(proof.size):
+                        notes.append("Merkle proof size != checkpoint leaf count")
+                        checkpoint_ok = False
 
     # 5. Optional: cross-check the on-chain OP_RETURN against the checkpoint.
     # Same binding requirement as checkpoint: without a proof, the OP_RETURN
@@ -188,13 +209,20 @@ def verify_full(
                     if parsed["merkle_root"].hex() != checkpoint_payload["root"]:
                         notes.append("Anchor OP_RETURN root != checkpoint signed root")
                         anchor_ok = False
-                    if "count" in checkpoint_payload and (
-                        parsed["leaf_count"] != int(checkpoint_payload["count"])
-                    ):
-                        notes.append(
-                            "Anchor OP_RETURN leaf_count != checkpoint count"
-                        )
-                        anchor_ok = False
+                    if "count" in checkpoint_payload:
+                        try:
+                            cp_count_for_anchor = int(checkpoint_payload["count"])
+                        except (TypeError, ValueError):
+                            # Already noted above; just skip the cross-check.
+                            cp_count_for_anchor = None
+                        if (
+                            cp_count_for_anchor is not None
+                            and parsed["leaf_count"] != cp_count_for_anchor
+                        ):
+                            notes.append(
+                                "Anchor OP_RETURN leaf_count != checkpoint count"
+                            )
+                            anchor_ok = False
 
     ok = (
         schnorr_ok

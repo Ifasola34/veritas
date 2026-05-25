@@ -119,6 +119,18 @@ def _make_ln_backend() -> LightningBackend:
                 "VERITAS_LN_BACKEND=lnd requires VERITAS_LND_URL and "
                 "VERITAS_LND_MACAROON (hex-encoded)"
             )
+        # Match the L402 secret hardening: reject obviously-wrong macaroon
+        # values at boot. Real LND macaroons are ~250 hex chars; a 1-char
+        # or non-hex value would silently boot and then 401 every Lightning
+        # request in production.
+        if len(macaroon) < 32 or not all(
+            c in "0123456789abcdefABCDEF" for c in macaroon
+        ):
+            raise RuntimeError(
+                "VERITAS_LND_MACAROON must be at least 32 hex chars "
+                "(real macaroons are typically ~250). Got "
+                f"{len(macaroon)} chars."
+            )
         return LndRestBackend(url=url, macaroon_hex=macaroon, tls_cert_path=cert_path)
     if name == "phoenixd":
         url = os.environ.get("VERITAS_PHOENIXD_URL")
@@ -127,6 +139,11 @@ def _make_ln_backend() -> LightningBackend:
             raise RuntimeError(
                 "VERITAS_LN_BACKEND=phoenixd requires VERITAS_PHOENIXD_URL and "
                 "VERITAS_PHOENIXD_PASSWORD"
+            )
+        if len(password) < 8:
+            raise RuntimeError(
+                "VERITAS_PHOENIXD_PASSWORD must be at least 8 characters; "
+                f"got {len(password)}."
             )
         return PhoenixdBackend(url=url, password=password)
     raise RuntimeError(f"unsupported VERITAS_LN_BACKEND: {name!r}")

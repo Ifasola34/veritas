@@ -26,9 +26,34 @@ import base64
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
+
+
+_HEX_ALPHABET = frozenset("0123456789abcdefABCDEF")
+
+
+def _validate_raw_hex(raw_hex: str) -> None:
+    """Reject anything that isn't pure hex BEFORE attempting to encode
+    as ASCII for the wire. Otherwise a non-ASCII char crashes
+    `raw_hex.encode('ascii')` with UnicodeEncodeError that escapes the
+    Broadcaster contract (which promises a BroadcastResult is always
+    returned)."""
+    if not raw_hex or not all(c in _HEX_ALPHABET for c in raw_hex):
+        raise ValueError("raw_hex must be hex (0-9, a-f, A-F) only")
+
+
+def _validate_http_url(url: str, field_name: str) -> None:
+    """Reject non-http/https schemes. A typo or env-pollution attack
+    setting VERITAS_BTC_RPC_URL=file:///etc/passwd would otherwise
+    make urlopen read local files."""
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"{field_name} must use http:// or https:// scheme, got {scheme!r}"
+        )
 
 
 _NETWORKS = {
@@ -82,6 +107,14 @@ class MempoolSpaceBroadcaster:
         self.name = f"mempool.space:{network}"
 
     def broadcast(self, raw_hex: str) -> BroadcastResult:
+        # Validate before encode so the BroadcastResult contract holds
+        # even for non-ASCII / non-hex inputs.
+        try:
+            _validate_raw_hex(raw_hex)
+        except ValueError as e:
+            return BroadcastResult(
+                ok=False, txid=None, error=str(e), backend=self.name,
+            )
         req = urllib.request.Request(
             self.url,
             data=raw_hex.encode("ascii"),
@@ -123,6 +156,7 @@ class BitcoindRpcBroadcaster:
         rpc_auth: tuple[str, str] | None = None,
         timeout_seconds: float = 15.0,
     ) -> None:
+        _validate_http_url(rpc_url, "BitcoindRpcBroadcaster rpc_url")
         self.rpc_url = rpc_url
         self.rpc_auth = rpc_auth
         self.timeout = timeout_seconds
@@ -200,6 +234,15 @@ def make_broadcaster() -> Broadcaster:
             )
         user = os.environ.get("VERITAS_BTC_RPC_USER")
         password = os.environ.get("VERITAS_BTC_RPC_PASS")
+        # Refuse partial credentials at startup. Without this check, an
+        # operator who sets USER but forgets PASS (or vice versa) silently
+        # gets a no-auth broadcaster — bitcoind then 401s mid-epoch and
+        # the anchor is built + persisted but never relayed.
+        if bool(user) != bool(password):
+            raise RuntimeError(
+                "VERITAS_BTC_RPC_USER and VERITAS_BTC_RPC_PASS must be set "
+                "together (or both unset for no-auth)"
+            )
         auth = (user, password) if user and password else None
         return BitcoindRpcBroadcaster(rpc_url=url, rpc_auth=auth)
     raise RuntimeError(f"unsupported VERITAS_BROADCASTER: {backend!r}")

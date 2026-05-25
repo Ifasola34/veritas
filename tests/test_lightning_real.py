@@ -79,13 +79,16 @@ def test_lnd_check_paid_404_treated_as_unpaid():
     assert ok is False
 
 
-def test_lnd_check_paid_other_http_error_propagates():
+def test_lnd_check_paid_other_http_error_wrapped_as_runtime_error():
+    """Round-3 fix: non-404 HTTP errors are wrapped in RuntimeError with
+    the status code in the message, so FastAPI surfaces a clean error
+    instead of escaping urllib's exception hierarchy."""
     err = urllib.error.HTTPError(
         url="https://n/v1/invoice/00", code=500, msg="Internal Error",
         hdrs={}, fp=io.BytesIO(b"{}"),
     )
     with patch("veritas.lightning.urllib.request.urlopen", side_effect=err):
-        with pytest.raises(urllib.error.HTTPError):
+        with pytest.raises(RuntimeError, match="HTTP 500"):
             LndRestBackend(url="https://n", macaroon_hex="ca").check_paid("00" * 32)
 
 

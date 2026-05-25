@@ -24,9 +24,36 @@ import secrets
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
+
+
+# Shared validation helpers used by both real LN backends.
+
+_HEX_ALPHABET = "0123456789abcdefABCDEF"
+
+
+def _validate_http_url(url: str, field_name: str) -> None:
+    """Reject non-http/https URL schemes at construction. Without this,
+    an env-pollution attack or operator typo setting VERITAS_LND_URL=
+    'file:///etc/passwd' would cause urlopen to read local files."""
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"{field_name} must use http:// or https:// scheme, got {scheme!r}"
+        )
+
+
+def _validate_payment_hash(payment_hash: str) -> None:
+    """Reject anything that isn't pure hex before interpolating into a
+    URL path. Stops `aaaa/../macaroons` style traversal even when
+    callers don't HMAC-bind the hash."""
+    if not payment_hash or not all(c in _HEX_ALPHABET for c in payment_hash):
+        raise ValueError(
+            "payment_hash must be hex (0-9, a-f, A-F) only"
+        )
 
 
 # ---------- macaroons (minimal) ----------
@@ -271,6 +298,7 @@ class LndRestBackend:
         tls_cert_path: str | None = None,
         timeout_seconds: float = 15.0,
     ) -> None:
+        _validate_http_url(url, "LndRestBackend url")
         # Normalize trailing slash so f-strings produce clean paths.
         self.url = url.rstrip("/")
         self.macaroon_hex = macaroon_hex
@@ -295,11 +323,18 @@ class LndRestBackend:
     def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
         # LND wants value (sats) for typical mainnet/testnet flows;
         # using value_msat is supported and avoids truncation.
-        resp = self._request("POST", "/v1/invoices", {
-            "value_msat": str(amount_msat),
-            "memo": memo,
-            "expiry": "3600",
-        })
+        # Wrap the HTTP call so an HTTPError (401/403/500) surfaces as
+        # a clean RuntimeError instead of escaping uncaught into FastAPI.
+        try:
+            resp = self._request("POST", "/v1/invoices", {
+                "value_msat": str(amount_msat),
+                "memo": memo,
+                "expiry": "3600",
+            })
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"LND create_invoice failed: HTTP {e.code} {e.reason}"
+            )
         # LND returns r_hash as base64. We need hex for the protocol.
         r_hash_b64 = resp["r_hash"]
         r_hash_hex = base64.b64decode(r_hash_b64).hex()
@@ -309,13 +344,17 @@ class LndRestBackend:
         )
 
     def check_paid(self, payment_hash: str) -> bool:
-        # LND accepts the r_hash as a hex string in the URL path.
+        # Alphabet-validate before URL interpolation — stops path
+        # traversal even when a future caller forgets to HMAC-bind.
+        _validate_payment_hash(payment_hash)
         try:
             resp = self._request("GET", f"/v1/invoice/{payment_hash}")
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return False
-            raise
+            raise RuntimeError(
+                f"LND check_paid failed: HTTP {e.code} {e.reason}"
+            )
         # LND returns invoice.state in {OPEN, SETTLED, CANCELED, ACCEPTED}.
         return resp.get("state") == "SETTLED" or bool(resp.get("settled"))
 
@@ -340,6 +379,7 @@ class PhoenixdBackend:
         password: str,
         timeout_seconds: float = 15.0,
     ) -> None:
+        _validate_http_url(url, "PhoenixdBackend url")
         self.url = url.rstrip("/")
         self.password = password
         self.timeout = timeout_seconds
@@ -365,10 +405,15 @@ class PhoenixdBackend:
     def create_invoice(self, amount_msat: int, memo: str) -> LnInvoice:
         # Phoenixd expects amountSat. Round up so we never under-charge.
         amount_sat = max(1, (amount_msat + 999) // 1000)
-        resp = self._request("POST", "/createinvoice", {
-            "amountSat": amount_sat,
-            "description": memo,
-        })
+        try:
+            resp = self._request("POST", "/createinvoice", {
+                "amountSat": amount_sat,
+                "description": memo,
+            })
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(
+                f"Phoenixd create_invoice failed: HTTP {e.code} {e.reason}"
+            )
         # Response: {"serialized": "<bolt11>", "paymentHash": "<hex>", ...}
         return LnInvoice(
             bolt11=resp["serialized"],
@@ -377,10 +422,13 @@ class PhoenixdBackend:
         )
 
     def check_paid(self, payment_hash: str) -> bool:
+        _validate_payment_hash(payment_hash)
         try:
             resp = self._request("GET", f"/payments/incoming/{payment_hash}")
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 return False
-            raise
+            raise RuntimeError(
+                f"Phoenixd check_paid failed: HTTP {e.code} {e.reason}"
+            )
         return bool(resp.get("isPaid"))

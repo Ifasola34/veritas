@@ -301,11 +301,19 @@ class Oracle:
                         body = json.loads(af.read_text())
                     except (json.JSONDecodeError, OSError):
                         continue  # skip torn/missing files
+                    # A top-level JSON list (e.g. `[]`) or anything other
+                    # than a dict would raise TypeError on `body["signed"]`
+                    # below. Treat as a torn file and skip rather than
+                    # panicking the daemon at startup.
+                    if not isinstance(body, dict):
+                        continue
                     try:
                         sa = SignedAttestation.from_json(
                             json.dumps(body["signed"])
                         )
                         evt_d = body["nostr"]
+                        if not isinstance(evt_d, dict):
+                            continue
                         evt = NostrEvent(
                             pubkey=evt_d["pubkey"],
                             created_at=evt_d["created_at"],
@@ -315,7 +323,7 @@ class Oracle:
                             id=evt_d.get("id", ""),
                             sig=evt_d.get("sig", ""),
                         )
-                    except (KeyError, ValueError):
+                    except (KeyError, ValueError, TypeError):
                         continue
                     attestations.append(sa)
                     events.append(evt)
@@ -330,11 +338,19 @@ class Oracle:
             if closed:
                 try:
                     cp = json.loads(cp_path.read_text())
+                    # Same defensive check as the atts loader: a tampered
+                    # checkpoint.json that's a top-level list crashes the
+                    # `cp.get(...)` calls with AttributeError. Treat as
+                    # torn and re-open the epoch rather than panicking.
+                    if not isinstance(cp, dict):
+                        raise ValueError("checkpoint.json root is not a dict")
                     root_hex = cp.get("root")
                     started_at = int(cp.get("closed_at", started_at))
                     expected_leaf_count = cp.get("leaf_count")
                     if cp.get("checkpoint_event"):
                         ce = cp["checkpoint_event"]
+                        if not isinstance(ce, dict):
+                            raise ValueError("checkpoint_event field is not a dict")
                         checkpoint_event = NostrEvent(
                             pubkey=ce["pubkey"],
                             created_at=ce["created_at"],
@@ -346,6 +362,8 @@ class Oracle:
                         )
                     if cp.get("anchor"):
                         a = cp["anchor"]
+                        if not isinstance(a, dict):
+                            raise ValueError("anchor field is not a dict")
                         anchor_tx = AnchorTx(
                             txid=a["txid"],
                             raw_hex=a["raw_hex"],
@@ -354,6 +372,8 @@ class Oracle:
                         )
                     if cp.get("broadcast"):
                         b = cp["broadcast"]
+                        if not isinstance(b, dict):
+                            raise ValueError("broadcast field is not a dict")
                         loaded_broadcast = BroadcastResult(
                             ok=bool(b.get("ok")),
                             txid=b.get("txid"),
@@ -362,7 +382,10 @@ class Oracle:
                         )
                     else:
                         loaded_broadcast = None
-                except (json.JSONDecodeError, KeyError, ValueError, OSError):
+                except (
+                    json.JSONDecodeError, KeyError, ValueError, TypeError,
+                    AttributeError, OSError,
+                ):
                     closed = False  # treat torn checkpoint as still-open
                     loaded_broadcast = None
             else:
