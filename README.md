@@ -1,5 +1,9 @@
 # VERITAS
 
+[![CI](https://github.com/Ifasola34/veritas/actions/workflows/ci.yml/badge.svg)](https://github.com/Ifasola34/veritas/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
 **Bitcoin-anchored attestation oracle.** Signs claims with BIP-340 Schnorr keys, publishes them as Nostr events, batches them into Bitcoin-style Merkle trees, and anchors each epoch root to Bitcoin via `OP_RETURN`. Premium streams are gated behind L402 Lightning paywalls.
 
 Trust collapses from *"trust the publisher"* to *"trust math and Bitcoin."*

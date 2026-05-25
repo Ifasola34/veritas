@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "veritas"
 version = "0.1.0"
 description = "Bitcoin-anchored, Schnorr-signed AI inference attestation oracle"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 authors = [{ name = "Ifasola", email = "Ifasola34@icloud.com" }]
 dependencies = [
     "coincurve>=20.0",
@@ -18,6 +18,9 @@ dependencies = [
     "websocket-client>=1.7",
     "pydantic>=2.7",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
 
 [project.scripts]
 veritas = "veritas.cli:cli"
