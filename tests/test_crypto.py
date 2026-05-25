@@ -5,6 +5,7 @@ import pytest
 
 from veritas.crypto import (
     OracleKey,
+    derive_anchor_key,
     schnorr_sign,
     schnorr_verify,
     tagged_hash,
@@ -66,3 +67,42 @@ def test_sha256d_matches_known_value():
         "0381534545f55cf43e41983f5d4c9456"
     )
     assert sha256d(b"") == expected
+
+
+# ---------- mutation-test-driven: derive_anchor_key test vector -------
+
+
+def test_derive_anchor_key_exact_vector():
+    key = OracleKey.from_hex("0" * 63 + "1")
+    expected = bytes.fromhex(
+        "451557d06d3ef788937b7b2f9241db3c038bb1b395442fab8cb96b69b2ec843e"
+    )
+    assert derive_anchor_key(key) == expected
+
+
+# ---------- mutation-test-driven: schnorr_verify guards ---------------
+
+
+def test_schnorr_verify_rejects_wrong_length_pubkey_only():
+    k = OracleKey.generate()
+    msg = os.urandom(32)
+    sig = schnorr_sign(msg, k)
+    assert schnorr_verify(msg, sig, k.xonly_pubkey[:31]) is False
+
+
+def test_schnorr_verify_rejects_wrong_length_sig_only():
+    k = OracleKey.generate()
+    msg = os.urandom(32)
+    sig = schnorr_sign(msg, k)
+    assert schnorr_verify(msg, sig[:63], k.xonly_pubkey) is False
+
+
+def test_schnorr_verify_rejects_wrong_length_msg_only():
+    k = OracleKey.generate()
+    msg = os.urandom(32)
+    sig = schnorr_sign(msg, k)
+    assert schnorr_verify(msg[:31], sig, k.xonly_pubkey) is False
+
+
+def test_schnorr_verify_rejects_all_wrong_lengths():
+    assert schnorr_verify(b"x", b"y", b"z") is False

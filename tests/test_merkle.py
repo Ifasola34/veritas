@@ -11,6 +11,7 @@ from veritas.merkle import (
     LEAF_PREFIX,
     MerkleProof,
     MerkleTree,
+    _expected_depth,
     verify_merkle_proof,
 )
 
@@ -102,3 +103,57 @@ def test_bitcoin_style_odd_duplication():
         + sha256d(INTERNAL_PREFIX + lc + lc)
     )
     assert t.root == expected
+
+
+# ---------- mutation-test-driven: guard clause coverage ---------------
+
+
+def test_expected_depth_single_leaf():
+    assert _expected_depth(1) == 0
+
+
+def test_verify_rejects_negative_size():
+    p = MerkleProof(leaf=b"\x00" * 32, siblings=[], directions=[],
+                    root=b"\x00" * 32, size=-1, index=0)
+    assert verify_merkle_proof(p) is False
+
+
+def test_verify_rejects_zero_size():
+    p = MerkleProof(leaf=b"\x00" * 32, siblings=[], directions=[],
+                    root=b"\x00" * 32, size=0, index=0)
+    assert verify_merkle_proof(p) is False
+
+
+def test_verify_rejects_index_equal_to_size():
+    t = MerkleTree([_digest(0)])
+    good = t.prove(0)
+    bad = MerkleProof(leaf=good.leaf, siblings=good.siblings,
+                      directions=good.directions, root=good.root,
+                      size=1, index=1)
+    assert verify_merkle_proof(bad) is False
+
+
+def test_verify_rejects_non_32_byte_leaf():
+    p = MerkleProof(leaf=b"\x00" * 31, siblings=[], directions=[],
+                    root=b"\x00" * 32, size=1, index=0)
+    assert verify_merkle_proof(p) is False
+
+
+def test_verify_rejects_mismatched_siblings_directions_length():
+    leaf = _digest(0)
+    t = MerkleTree([leaf, _digest(1)])
+    good = t.prove(0)
+    bad = MerkleProof(leaf=good.leaf, siblings=good.siblings,
+                      directions=[], root=good.root,
+                      size=good.size, index=good.index)
+    assert verify_merkle_proof(bad) is False
+
+
+def test_verify_rejects_non_32_byte_sibling():
+    leaf = _digest(0)
+    t = MerkleTree([leaf, _digest(1)])
+    good = t.prove(0)
+    bad = MerkleProof(leaf=good.leaf, siblings=[b"\x00" * 31],
+                      directions=good.directions, root=good.root,
+                      size=good.size, index=good.index)
+    assert verify_merkle_proof(bad) is False
