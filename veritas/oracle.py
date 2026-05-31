@@ -55,6 +55,11 @@ class Epoch:
     checkpoint_event: NostrEvent | None = None
     anchor_tx: AnchorTx | None = None
     broadcast_result: BroadcastResult | None = None
+    # Lazily-built Merkle tree, cached for inclusion_proof. A closed epoch is
+    # immutable, so the tree is built once and reused rather than rebuilt on
+    # every proof request. Excluded from compare/repr so it doesn't affect
+    # Epoch equality or debugging output.
+    tree: MerkleTree | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -131,12 +136,18 @@ class Oracle:
             epoch = self.get_epoch(epoch_n)
             if epoch is None or not epoch.closed:
                 return None
-            digests = [
-                attestation_digest(sa.attestation) for sa in epoch.attestations
-            ]
-            if not 0 <= index < len(digests):
+            if not 0 <= index < len(epoch.attestations):
                 return None
-            return MerkleTree(digests).prove(index)
+            # Build the tree once per closed epoch and cache it. Without this,
+            # proving N leaves rebuilt the entire tree N times — O(N^2)
+            # hashing on the verifier-facing read path.
+            if epoch.tree is None:
+                digests = [
+                    attestation_digest(sa.attestation)
+                    for sa in epoch.attestations
+                ]
+                epoch.tree = MerkleTree(digests)
+            return epoch.tree.prove(index)
 
     # -- internal ------------------------------------------------------
 

@@ -122,7 +122,15 @@ def build_attestation_event(
 
 
 def decode_attestation_event(evt: NostrEvent) -> SignedAttestation:
-    """Reverse build_attestation_event — extract the SignedAttestation."""
+    """Reverse build_attestation_event — extract the SignedAttestation.
+
+    Contract: this decodes only; it does NOT verify either signature.
+    Callers needing authenticity MUST call ``.verify()`` on the returned
+    SignedAttestation (and ``evt.verify()`` separately if they also rely on
+    the Nostr wrapper's authorship claim). This matches vrt1-kwh's
+    ``decode_measurement_event``; vrt1-agents' ``decode_action_event``
+    deliberately verifies by default instead — choose per call site.
+    """
     raw = base64.b64decode(evt.content)
     return SignedAttestation.from_json(raw)
 

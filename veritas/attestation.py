@@ -66,8 +66,14 @@ class SignedAttestation:
 
     def verify(self) -> bool:
         msg = attestation_digest(self.attestation)
-        sig = bytes.fromhex(self.sig)
-        pk = bytes.fromhex(self.attestation.oracle)
+        try:
+            sig = bytes.fromhex(self.sig)
+            pk = bytes.fromhex(self.attestation.oracle)
+        except ValueError:
+            # Malformed (non-hex) sig or pubkey is a failed verification,
+            # not an exception to surface to the caller. Matches the
+            # behaviour of SignedMeasurement / SignedAction.verify().
+            return False
         return schnorr_verify(msg, sig, pk)
 
     def to_json(self) -> str:
