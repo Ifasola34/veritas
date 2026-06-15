@@ -67,6 +67,8 @@ VERITAS has been through two rounds of full-codebase code review with all findin
 
 ## Quickstart
 
+> 👋 **New to VERITAS?** The [**hands-on walkthrough (`TRY-IT.md`)**](TRY-IT.md) is the gentlest start — verify a real Bitcoin-anchored attestation in your browser, then run the whole chain yourself in ~15 minutes.
+
 Requires Python 3.10+.
 
 ```bash
