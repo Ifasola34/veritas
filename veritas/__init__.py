@@ -17,7 +17,8 @@ from .attestation import Attestation, attestation_digest
 from .merkle import MerkleTree, MerkleProof, verify_merkle_proof
 from .nostr import NostrEvent, build_attestation_event, build_checkpoint_event
 from .anchor import build_anchor_tx, AnchorTx
-from .verifier import VerificationResult, verify_full
+from .models import normalize_input
+from .verifier import VerificationResult, verify_full, verify_reveal
 
 __all__ = [
     "__version__",
@@ -39,4 +40,6 @@ __all__ = [
     "AnchorTx",
     "VerificationResult",
     "verify_full",
+    "verify_reveal",
+    "normalize_input",
 ]

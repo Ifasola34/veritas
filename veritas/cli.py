@@ -20,9 +20,10 @@ from .broadcast import make_broadcaster
 from .crypto import OracleKey
 from .lightning import DeterministicMockBackend, authorize, make_challenge
 from .merkle import verify_merkle_proof, MerkleProof
+from .models import normalize_input
 from .nostr import NostrEvent, decode_attestation_event
 from .oracle import Oracle, OracleConfig
-from .verifier import verify_full
+from .verifier import verify_full, verify_reveal
 
 
 console = Console()
@@ -92,12 +93,24 @@ def serve(key_path: str, data_dir: str, epoch_seconds: int, host: str, port: int
 @click.option("--key", "key_path", type=click.Path(exists=True), default="oracle.key")
 @click.option("--data-dir", type=click.Path(), default="./veritas-data")
 @click.option("--model", required=True)
+@click.option("--private", "private", is_flag=True, default=False,
+              help="Salt the input_hash so a low-entropy input can't be "
+                   "recovered by guessing the published hash. Prints a secret "
+                   "salt you MUST keep to reveal later.")
+@click.option("--salt", "salt", type=str, default=None,
+              help="Use this explicit salt (hex) instead of a generated one. "
+                   "Implies --private.")
 @click.argument("text")
-def attest(key_path: str, data_dir: str, model: str, text: str) -> None:
+def attest(key_path: str, data_dir: str, model: str,
+           private: bool, salt: str | None, text: str) -> None:
     """Run a single inference + attestation locally and print everything."""
     key = OracleKey.from_hex(Path(key_path).read_text().strip())
     oracle = Oracle(key, OracleConfig(data_dir=Path(data_dir)))
-    signed, evt = oracle.attest(model, text)
+
+    # --salt implies --private; --private with no explicit salt generates one.
+    if salt is None and private:
+        salt = Oracle.gen_salt()
+    signed, evt = oracle.attest(model, text, salt=salt)
     digest = attestation_digest(signed.attestation).hex()
 
     t = Table(title="Attestation", show_header=False)
@@ -111,12 +124,60 @@ def attest(key_path: str, data_dir: str, model: str, text: str) -> None:
     t.add_row("sig", signed.sig)
     console.print(t)
 
+    if salt:
+        console.print(Panel.fit(
+            f"[bold yellow]SALTED commitment[/bold yellow] — input_hash = "
+            f"SHA256(normalized_input ‖ salt)\n"
+            f"secret salt: [bold]{salt}[/bold]\n\n"
+            f"[red]Keep this salt private and store it with the original "
+            f"content.[/red] It is NOT in the attestation or the Nostr event. "
+            f"You need it to reveal later:\n"
+            f"  veritas reveal <attestation.json> --content '…' --salt {salt}",
+            title="commit-and-reveal", title_align="left",
+        ))
+
     console.print(Panel(
         Syntax(json.dumps(evt.to_dict(), indent=2), "json",
                background_color="default"),
         title="NIP-01 Nostr event",
         title_align="left",
     ))
+
+
+@cli.command()
+@click.argument("attestation_file", type=click.Path(exists=True))
+@click.option("--content", required=True,
+              help="The original input text to reveal and check.")
+@click.option("--salt", default="",
+              help="The secret salt, if the commitment was salted.")
+def reveal(attestation_file: str, content: str, salt: str) -> None:
+    """Reveal an original record and check it matches an attestation's input_hash.
+
+    The commit-and-reveal step: prove that this exact content is the one a
+    signed, anchored attestation committed to — without the plaintext having
+    been published up front. Exits 0 on MATCH, 1 on MISMATCH.
+    """
+    try:
+        signed = SignedAttestation.from_json(Path(attestation_file).read_text())
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        raise click.ClickException(f"invalid attestation file: {e}")
+
+    committed = signed.attestation.input_hash
+    _, computed = normalize_input(content, salt=salt)
+    ok = verify_reveal(content, committed, salt=salt)
+
+    t = Table(title="Reveal check", show_header=False)
+    t.add_row("committed input_hash", committed)
+    t.add_row("recomputed input_hash", computed)
+    t.add_row("salt", salt or "[grey](none — bare commitment)[/grey]")
+    console.print(t)
+    console.print(Panel.fit(
+        "[bold green]MATCH — this content is what was attested[/bold green]"
+        if ok else
+        "[bold red]NO MATCH — content (or salt) does not match the "
+        "commitment[/bold red]"
+    ))
+    sys.exit(0 if ok else 1)
 
 
 @cli.command()

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -97,10 +98,35 @@ class Oracle:
     def list_models(self) -> list[str]:
         return sorted(self.models.keys())
 
-    def attest(self, model_id: str, input_text: str) -> tuple[SignedAttestation, NostrEvent]:
+    @staticmethod
+    def gen_salt() -> str:
+        """A fresh 16-byte (128-bit) commitment salt, hex-encoded.
+
+        Use one per private attestation and store it privately alongside
+        the content for later reveal — it is the secret that makes a
+        low-entropy input_hash unguessable.
+        """
+        return secrets.token_hex(16)
+
+    def attest(
+        self, model_id: str, input_text: str, salt: str | None = None
+    ) -> tuple[SignedAttestation, NostrEvent]:
+        """Sign one inference.
+
+        `salt` (optional) produces a *salted* input_hash commitment
+        `SHA256(norm ‖ salt)` so a low-entropy input can't be recovered by
+        guessing the published hash — needed for private (commit-only /
+        metadata-public) attestations. Pass `Oracle.gen_salt()` and keep
+        the returned salt privately; reveal re-supplies (content, salt).
+        `salt=None` (the default) is the original bare commitment, so
+        public attestations and existing callers are unchanged. The salt
+        is intentionally NOT placed in the signed attestation or the Nostr
+        event — publishing it would defeat its purpose; it is the holder's
+        secret until they choose to reveal.
+        """
         if model_id not in self.models:
             raise KeyError(f"unknown model: {model_id}")
-        norm, input_hash = normalize_input(input_text)
+        norm, input_hash = normalize_input(input_text, salt=salt or "")
         output = self.models[model_id].infer(norm)
         with self._lock:
             self._maybe_roll_epoch()

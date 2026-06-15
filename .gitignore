@@ -32,4 +32,13 @@ veritas-data/
 
 # Local-only docs (not for public repo)
 GRANT_APPLICATIONS.md
+MANIFUND_PAGE.md
+COMPETITIVE_NOTES.md
 docs/HANDOFF.md
+EXPLAINER.md
+ANNOUNCEMENT_DRAFT.md
+NOSTR_DRAFTS.md
+diagrams/
+nlnet-prompts.txt
+nlnet_veritas_full_budget.pdf
+mutants/

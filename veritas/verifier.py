@@ -21,13 +21,36 @@ The verifier binds artifacts together at every boundary:
 
 from __future__ import annotations
 
+import hmac
 import json
 from dataclasses import dataclass
 
 from .anchor import extract_op_return_from_raw_tx, parse_op_return_payload
 from .attestation import SignedAttestation, attestation_digest
 from .merkle import MerkleProof, verify_merkle_proof
+from .models import normalize_input
 from .nostr import NostrEvent
+
+
+def verify_reveal(content: str, input_hash: str, salt: str = "") -> bool:
+    """Commit-and-reveal check: does this original content (+ salt) reproduce
+    the committed `input_hash`?
+
+    This is the claim-time step. The attestation commits only a fingerprint
+    of the input (`input_hash`); the plaintext is never required to be
+    published. At claim time the holder reveals the original record and, for
+    a salted commitment, its secret salt — we recompute the fingerprint and
+    confirm it equals the one inside the signed, anchored attestation. A
+    match proves *this exact content* is what was attested and anchored,
+    unaltered.
+
+    Pairs with verify_full(): verify_full proves the attestation is genuine
+    and on-chain; verify_reveal proves which content that attestation
+    commits to. Together they answer "this real document is the one the AI
+    attested at this Bitcoin-stamped time."
+    """
+    _, computed = normalize_input(content, salt=salt)
+    return hmac.compare_digest(computed.lower(), input_hash.strip().lower())
 
 
 @dataclass

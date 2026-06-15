@@ -23,10 +23,29 @@ class OracleModel(Protocol):
     def infer(self, input_text: str) -> dict[str, Any]: ...
 
 
-def normalize_input(text: str) -> tuple[str, str]:
-    """Whitespace-collapse, lowercase. Returns (normalized, sha256_hex)."""
+def normalize_input(text: str, salt: str = "") -> tuple[str, str]:
+    """Whitespace-collapse, lowercase, then hash. Returns (normalized, sha256_hex).
+
+    The returned hex digest is the attestation's `input_hash` — the
+    commitment to the content.
+
+    `salt` enables a *salted commitment* `SHA256(norm ‖ salt)`. A bare
+    `SHA256(norm)` (salt="") is reversible by guessing when the content is
+    low-entropy: an adversary hashes every plausible decision
+    ("approved"/"denied"/…) and matches the published `input_hash` without
+    ever seeing a reveal, defeating private (commit-only) attestations. A
+    per-attestation random `salt`, kept secret until reveal, closes that
+    gap. Reveal then re-supplies (content, salt) and recomputes this digest.
+
+    salt="" reproduces the original bare hash byte-for-byte, so existing
+    attestations (and the on-chain genesis) verify unchanged. The salt is
+    appended as text — there is no separator, so the construction matches
+    the JS verifier's `sha256(norm + salt)` exactly; the salt is a
+    fixed-length random hex string, so the concatenation is unambiguous in
+    practice.
+    """
     norm = re.sub(r"\s+", " ", text.strip().lower())
-    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256((norm + salt).encode("utf-8")).hexdigest()
     return norm, digest
 
 

@@ -102,7 +102,6 @@ def main() -> None:
                 nostr_event=evt,
                 proof=proof,
                 checkpoint_event=epoch.checkpoint_event,
-                checkpoint_root_hex=epoch.root_hex,
             )
             tag = "[green]VERIFIED[/green]" if r.ok else "[red]REJECTED[/red]"
             console.print(
