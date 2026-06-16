@@ -30,6 +30,9 @@ veritas-data/
 *.swp
 *.swo
 
+# Tooling cache
+.wrangler/
+
 # Local-only docs (not for public repo)
 GRANT_APPLICATIONS.md
 MANIFUND_PAGE.md
