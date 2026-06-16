@@ -30,6 +30,19 @@ Python 3.10+ and this repo installed: from the repo root, `pip install -e .`
    attestation's fingerprint, committed to Bitcoin mainnet. Anyone can verify it
    at <https://vrt1-web-verifier.pages.dev>.
 
+## Getting your BTC back
+
+After anchoring, your change (everything except the fee) is back at your
+`bc1q...` funding address. To move it to your own wallet:
+
+```
+python sweep.py <your-wallet-address>
+```
+
+It shows the amount and fee and asks you to type `yes` before sending. The
+destination can be native segwit (`bc1q...`) or a legacy (`1.../3...`) address.
+(`--yes` skips the prompt; `--rate N` sets the fee rate in sat/vB.)
+
 To attest your own statement, edit `TEXT` near the top of `anchor.py` before
 step 3.
 
