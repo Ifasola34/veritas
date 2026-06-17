@@ -13,7 +13,7 @@ Two different things happen, and only one ever costs money:
 - **Signing is free.** It is pure cryptography that runs entirely on your own computer, instantly. It proves **who** made a claim and that it has **not been altered.** This is what you do in Part 2, and nothing touches Bitcoin.
 - **Anchoring is putting it on Bitcoin.** It stamps a fingerprint of a batch of signed records into a real Bitcoin transaction. That proves a record **existed by a certain time** and cannot be quietly rewritten, and it is the only step that creates a public link you can look up online.
 
-**What it costs:** Signing costs nothing. A single anchor transaction is tiny: the real one from 13 June 2026 cost about **$0.23**, and one transaction can certify an unlimited batch of records at once, so the cost per record rounds to zero. Anchoring your own record on real Bitcoin (Part 3) is optional. If you choose to, you need a funded Bitcoin wallet and you set your own maximum fee, which in practice stays well under $1, and a few dollars at most on a busy day. For free practice, VERITAS can anchor to Bitcoin's free test network instead.
+**What it costs:** Signing costs nothing. A single anchor transaction is tiny: the two real anchors so far cost about **$0.23** (13 June 2026) and **$0.35** (17 June 2026), and one transaction can certify an unlimited batch of records at once, so the cost per record rounds to zero. Anchoring your own record on real Bitcoin (Part 3) is optional. If you choose to, you need a funded Bitcoin wallet and you set your own maximum fee, which in practice runs approximately $0.23 to $0.35, stays well under $1 in normal conditions, and reaches a few dollars at most on a busy day. For free practice, VERITAS can anchor to Bitcoin's free test network instead.
 
 ---
 
@@ -97,7 +97,7 @@ Stay skeptical and verify each layer yourself as you go. The whole point of VERI
 *Parts 1 and 2 are the whole demo. This part is optional, and it is the only part that costs anything.*
 
 1. **Free practice:** VERITAS defaults to signet, Bitcoin's free test network. With free coins from a faucet it will broadcast a real anchor there at no cost. (A few more steps; ask whoever shared this with you if you want to go that far.)
-2. **Real Bitcoin:** switching to the main network is a single setting change. You need a funded wallet and you set your own maximum fee (about $0.23 in normal conditions, as the 13 June anchor showed). That is how the genesis you verified in Part 1 was made.
+2. **Real Bitcoin:** switching to the main network is a single setting change. You need a funded wallet and you set your own maximum fee (approximately $0.23 to $0.35 in normal conditions, as the 13 and 17 June anchors showed). That is how the genesis you verified in Part 1 was made.
 
 **Key idea:** signing is free and instant, and **one** Bitcoin transaction can certify an **unlimited batch** of attestations, so anchoring stays cheap at any scale.
 
