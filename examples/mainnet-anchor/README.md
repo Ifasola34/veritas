@@ -33,15 +33,22 @@ Python 3.10+ and this repo installed: from the repo root, `pip install -e .`
 ## Getting your BTC back
 
 After anchoring, your change (everything except the fee) is back at your
-`bc1q...` funding address. To move it to your own wallet:
+`bc1q...` funding address. **First wait for the anchor transaction to confirm
+(1 block)** — the sweep only spends *confirmed* coins, so running it sooner just
+reports `No confirmed BTC to sweep`. Once it's in a block, move the change to
+your own wallet:
 
 ```
-python sweep.py <your-wallet-address>
+python sweep.py bc1qYOUR_OWN_ADDRESS
 ```
 
-It shows the amount and fee and asks you to type `yes` before sending. The
-destination can be native segwit (`bc1q...`) or a legacy (`1.../3...`) address.
-(`--yes` skips the prompt; `--rate N` sets the fee rate in sat/vB.)
+Replace `bc1qYOUR_OWN_ADDRESS` with a real receive address **from your own
+wallet** — native segwit (`bc1q...`) or legacy (`1.../3...`), **not** a Taproot
+`bc1p...` address. (Paste the placeholder verbatim and the script stops and
+tells you to use your own address; a mistyped address fails its checksum, so
+funds can't be sent into the void.) It shows the amount and fee and asks you to
+type `yes` before sending. (`--yes` skips the prompt; `--rate N` sets the fee
+rate in sat/vB.)
 
 To attest your own statement, pass it on the command line:
 `python anchor.py --text "your statement"` (or edit the `TEXT` line near the top

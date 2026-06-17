@@ -126,6 +126,22 @@ def dest_spk(addr):
     raise ValueError(f"unsupported address version byte {ver:#x}")
 
 
+# Tell-tale fragments of the example placeholder, so a copy-pasted
+# "bc1q-your-wallet-address" gets a friendly nudge instead of a scary traceback.
+_PLACEHOLDERS = (
+    "your-wallet", "your_wallet", "yourwallet",
+    "your-address", "your_address", "youraddress",
+    "your-actual", "your_actual", "youractual",
+    "your-receive", "yourreceive", "example", "placeholder",
+)
+
+
+def looks_like_placeholder(addr):
+    """True if the user pasted an example placeholder instead of a real address."""
+    a = addr.strip().lower()
+    return a.startswith("<") or a.endswith(">") or any(h in a for h in _PLACEHOLDERS)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Sweep your VERITAS funding address back to your wallet.")
     ap.add_argument("dest", help="your wallet address to receive the BTC (bc1q... or 1.../3...)")
@@ -141,7 +157,16 @@ def main():
     anchor_pub = derive_anchor_pubkey(anchor_priv)
     src = encode_segwit("bc", 0, h160(anchor_pub))
 
-    spk, kind = dest_spk(args.dest)  # validates the destination early (raises on a typo)
+    if looks_like_placeholder(args.dest):
+        raise SystemExit(
+            "That looks like the example placeholder, not a real address.\n"
+            f"  you passed: {args.dest}\n"
+            "Replace it with YOUR OWN wallet's receive address -- a native segwit\n"
+            "(bc1q...) or legacy (1.../3...) address, NOT a Taproot (bc1p...) one.")
+    try:
+        spk, kind = dest_spk(args.dest)  # validates early -- a typo can't send funds into the void
+    except ValueError as e:
+        raise SystemExit(f"That destination address didn't validate: {e}")
 
     utxos = [c for c in _get(f"{MEMPOOL}/address/{src}/utxo") if c.get("status", {}).get("confirmed")]
     if not utxos:
