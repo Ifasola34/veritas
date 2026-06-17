@@ -33,7 +33,8 @@ from veritas.broadcast import NullBroadcaster, MempoolSpaceBroadcaster  # noqa: 
 from bech32 import encode_segwit  # noqa: E402
 
 MEMPOOL = "https://mempool.space/api"  # mainnet
-# Edit TEXT to attest your own statement:
+# Default statement to attest. Override per-run without editing this file:
+#   python anchor.py --text "your own statement"
 TEXT = "VERITAS: verifiable AI attestation anchored to Bitcoin"
 MODEL = "veritas.sentiment.keyword.v1"
 
@@ -56,9 +57,13 @@ def _usd(sats: int) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description="Anchor a VERITAS attestation to Bitcoin mainnet (spends real BTC).")
+    ap.add_argument("--text", default=TEXT,
+                    help="the statement to attest (default: the sample sentence). "
+                         "Lets you anchor your own message without editing this file.")
     ap.add_argument("--yes", action="store_true",
                     help="skip the interactive confirmation and broadcast immediately")
     args = ap.parse_args()
+    text = args.text
 
     keyfile = os.path.join(HERE, "oracle.key")
     if not os.path.exists(keyfile):
@@ -91,7 +96,7 @@ def main():
 
     oracle = Oracle(key, OracleConfig(
         data_dir=data_dir, anchor_utxo=utxo, fee_sats=fee_sats, broadcaster=NullBroadcaster()))
-    signed, evt = oracle.attest(MODEL, TEXT)
+    signed, evt = oracle.attest(MODEL, text)
     epoch = oracle.close_epoch()
     proof = oracle.inclusion_proof(epoch.number, 0)
     anchor = epoch.anchor_tx
@@ -103,7 +108,7 @@ def main():
     print("VERITAS mainnet anchor   ==>  REAL BITCOIN  <==")
     print("=" * 70)
     print(f"  funding address : {addr}")
-    print(f"  attested text   : {TEXT!r}")
+    print(f"  attested text   : {text!r}")
     print(f"  input_hash      : {signed.attestation.input_hash}")
     print(f"  oracle pubkey   : {key.xonly_pubkey_hex}")
     print(f"  merkle root     : {epoch.root_hex}  (leaves: {decoded['leaf_count']})")
@@ -141,7 +146,7 @@ def main():
             "network": "mainnet",
             "anchor_txid": anchor.txid,
             "oracle_pubkey": key.xonly_pubkey_hex,
-            "input_text": TEXT,
+            "input_text": text,
             "input_hash": signed.attestation.input_hash,
             "model": MODEL,
             "model_output": signed.attestation.output,

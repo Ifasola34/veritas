@@ -43,7 +43,8 @@ It shows the amount and fee and asks you to type `yes` before sending. The
 destination can be native segwit (`bc1q...`) or a legacy (`1.../3...`) address.
 (`--yes` skips the prompt; `--rate N` sets the fee rate in sat/vB.)
 
-To attest your own statement, edit `TEXT` near the top of `anchor.py` before
-step 3.
+To attest your own statement, pass it on the command line:
+`python anchor.py --text "your statement"` (or edit the `TEXT` line near the top
+of `anchor.py`).
 
 Your `oracle.key` and `artifacts/` stay local (gitignored).
