@@ -18,14 +18,16 @@ Python 3.10+ and this repo installed: from the repo root, `pip install -e .`
    Copy the printed `bc1q...` address.
 2. Fund that address from your own wallet with a dollar or two of BTC, and wait
    for **1 confirmation**. (The anchor needs only the network fee + dust.)
-3. Build and broadcast the anchor:
+3. Build and broadcast the anchor. Put the statement you want to attest right on
+   the command line with `--text` — whatever you pass is exactly what gets
+   fingerprinted, so there's no file to edit:
    ```
-   python anchor.py
+   python anchor.py --text "Anchor Demo BTC"
    ```
-   It builds the transaction, shows you the exact tx, the fee, and the cost in
-   USD, then asks you to type `yes` before it broadcasts anything. On
-   confirmation it prints the `txid` and a `mempool.space/tx/...` link.
-   (Pass `--yes` to skip the prompt.)
+   (Omit `--text` to anchor the default sample sentence.) It builds the
+   transaction, shows you the exact tx, the fee, and the cost in USD, then asks
+   you to type `yes` before it broadcasts anything. On confirmation it prints the
+   `txid` and a `mempool.space/tx/...` link. (Pass `--yes` to skip the prompt.)
 4. Open that link and scroll to the `OP_RETURN` output — that is your
    attestation's fingerprint, committed to Bitcoin mainnet. Anyone can verify it
    at <https://vrt1-web-verifier.pages.dev>.
@@ -50,8 +52,9 @@ funds can't be sent into the void.) It shows the amount and fee and asks you to
 type `yes` before sending. (`--yes` skips the prompt; `--rate N` sets the fee
 rate in sat/vB.)
 
-To attest your own statement, pass it on the command line:
-`python anchor.py --text "your statement"` (or edit the `TEXT` line near the top
-of `anchor.py`).
+To attest your own statement, pass it with `--text "your statement"` — that text
+is exactly what gets hashed and anchored. Don't edit the example in the comment
+block of `anchor.py`: comments aren't code, so the anchor would just fall back to
+the default sentence.
 
 Your `oracle.key` and `artifacts/` stay local (gitignored).
